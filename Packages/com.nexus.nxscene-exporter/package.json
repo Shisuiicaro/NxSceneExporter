@@ -1,0 +1,15 @@
+{
+  "name": "com.nexus.nxscene-exporter",
+  "version": "1.0.0",
+  "displayName": "NxScene Exporter",
+  "unity": "2022.3",
+  "description": "Exports Unity scenes/prefab folders to .nxscene for Nexus RTE import.",
+  "keywords": [
+    "nxscene",
+    "assetbundle",
+    "exporter"
+  ],
+  "author": {
+    "name": "Shisuys"
+  }
+}
