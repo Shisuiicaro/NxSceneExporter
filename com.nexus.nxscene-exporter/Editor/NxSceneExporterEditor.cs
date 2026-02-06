@@ -6,12 +6,10 @@ using System.IO.Compression;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
-using UnityEngine.SceneManagement;
-using Nexus.NxScene;
 
-public static class NxSceneExporterEditor
+public static class NxSceneExporterWithLayersEditor
 {
-    [MenuItem("Tools/Nexus/Export/Export Current Scene (.nxscene)", false, 2000)]
+    [MenuItem("Tools/Nexus/Export/Export Current Scene (.nxscene + Layers)", false, 2000)]
     public static void ExportCurrentScene()
     {
         var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
@@ -50,7 +48,7 @@ public static class NxSceneExporterEditor
                 prefabPathByRoot[root] = prefabPath;
             }
 
-            var prefabEntriesByPath = new Dictionary<string, NxScenePrefab>(StringComparer.OrdinalIgnoreCase);
+            var prefabEntriesByPath = new Dictionary<string, NxScenePrefabData>(StringComparer.OrdinalIgnoreCase);
             foreach (var kv in prefabPathByRoot)
             {
                 string prefabPath = kv.Value;
@@ -62,16 +60,16 @@ public static class NxSceneExporterEditor
                 string guid = AssetDatabase.AssetPathToGUID(prefabPath);
                 string name = Path.GetFileNameWithoutExtension(prefabPath);
 
-                prefabEntriesByPath[prefabPath] = new NxScenePrefab
+                prefabEntriesByPath[prefabPath] = new NxScenePrefabData
                 {
                     id = guid,
                     name = name,
-                    bundles = new NxScenePlatformBundle[0]
+                    bundles = new NxScenePlatformBundleData[0]
                 };
             }
 
             var prefabs = prefabEntriesByPath.Values.OrderBy(p => p.name).ToArray();
-            var instances = new List<NxSceneInstance>();
+            var instances = new List<NxSceneInstanceData>();
 
             foreach (var root in exportRoots)
             {
@@ -82,7 +80,7 @@ public static class NxSceneExporterEditor
 
                 var prefab = prefabEntriesByPath[prefabPath];
 
-                instances.Add(new NxSceneInstance
+                instances.Add(new NxSceneInstanceData
                 {
                     name = root.name,
                     prefabId = prefab.id,
@@ -103,18 +101,18 @@ public static class NxSceneExporterEditor
                 assetNames = new[] { GetPrefabPathByGuid(prefabEntriesByPath, p.id) }
             }).ToArray();
 
-            var manifestPrefabs = new List<NxScenePrefab>();
+            var manifestPrefabs = new List<NxScenePrefabData>();
             foreach (var p in prefabs)
             {
-                manifestPrefabs.Add(new NxScenePrefab
+                manifestPrefabs.Add(new NxScenePrefabData
                 {
                     id = p.id,
                     name = p.name,
                     bundles = new[]
                     {
-                        new NxScenePlatformBundle { platform = "StandaloneWindows64", path = $"bundles/StandaloneWindows64/{GetBundleFileName(p)}" },
-                        new NxScenePlatformBundle { platform = "StandaloneOSX", path = $"bundles/StandaloneOSX/{GetBundleFileName(p)}" },
-                        new NxScenePlatformBundle { platform = "StandaloneLinux64", path = $"bundles/StandaloneLinux64/{GetBundleFileName(p)}" },
+                        new NxScenePlatformBundleData { platform = "StandaloneWindows64", path = $"bundles/StandaloneWindows64/{GetBundleFileName(p)}" },
+                        new NxScenePlatformBundleData { platform = "StandaloneOSX", path = $"bundles/StandaloneOSX/{GetBundleFileName(p)}" },
+                        new NxScenePlatformBundleData { platform = "StandaloneLinux64", path = $"bundles/StandaloneLinux64/{GetBundleFileName(p)}" },
                     }
                 });
             }
@@ -123,10 +121,11 @@ public static class NxSceneExporterEditor
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneOSX"), builds, BuildTarget.StandaloneOSX);
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneLinux64"), builds, BuildTarget.StandaloneLinux64);
 
-            var manifest = new NxSceneManifest
+            var manifest = new NxSceneManifestData
             {
-                version = "1",
+                version = "2",
                 sceneName = sceneName,
+                layerNames = CaptureLayerNames(),
                 prefabs = manifestPrefabs.ToArray(),
                 instances = instances.ToArray()
             };
@@ -134,7 +133,7 @@ public static class NxSceneExporterEditor
             string manifestPath = Path.Combine(tempDir, "manifest.json");
             File.WriteAllText(manifestPath, JsonUtility.ToJson(manifest));
 
-            CreateZip(outputPath, tempDir, manifest);
+            CreateZip(outputPath, tempDir);
 
             EditorUtility.RevealInFinder(outputPath);
         }
@@ -164,7 +163,7 @@ public static class NxSceneExporterEditor
         }
     }
 
-    [MenuItem("Tools/Nexus/Export/Export Prefab Folder (.nxscene)", false, 2001)]
+    [MenuItem("Tools/Nexus/Export/Export Prefab Folder (.nxscene + Layers)", false, 2001)]
     public static void ExportPrefabFolder()
     {
         string folderPath = TryGetSelectedProjectFolderPath();
@@ -214,7 +213,7 @@ public static class NxSceneExporterEditor
                 .OrderBy(p => p)
                 .ToArray();
 
-            var prefabs = new List<NxScenePrefab>();
+            var prefabs = new List<NxScenePrefabData>();
             var prefabPathByGuid = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             for (int i = 0; i < prefabPaths.Length; i++)
@@ -227,15 +226,15 @@ public static class NxSceneExporterEditor
                 }
 
                 string name = Path.GetFileNameWithoutExtension(prefabPath);
-                prefabs.Add(new NxScenePrefab
+                prefabs.Add(new NxScenePrefabData
                 {
                     id = guid,
                     name = name,
                     bundles = new[]
                     {
-                        new NxScenePlatformBundle { platform = "StandaloneWindows64", path = $"bundles/StandaloneWindows64/{GetBundleFileName(new NxScenePrefab { id = guid, name = name })}" },
-                        new NxScenePlatformBundle { platform = "StandaloneOSX", path = $"bundles/StandaloneOSX/{GetBundleFileName(new NxScenePrefab { id = guid, name = name })}" },
-                        new NxScenePlatformBundle { platform = "StandaloneLinux64", path = $"bundles/StandaloneLinux64/{GetBundleFileName(new NxScenePrefab { id = guid, name = name })}" },
+                        new NxScenePlatformBundleData { platform = "StandaloneWindows64", path = $"bundles/StandaloneWindows64/{GetBundleFileName(new NxScenePrefabData { id = guid, name = name })}" },
+                        new NxScenePlatformBundleData { platform = "StandaloneOSX", path = $"bundles/StandaloneOSX/{GetBundleFileName(new NxScenePrefabData { id = guid, name = name })}" },
+                        new NxScenePlatformBundleData { platform = "StandaloneLinux64", path = $"bundles/StandaloneLinux64/{GetBundleFileName(new NxScenePrefabData { id = guid, name = name })}" },
                     }
                 });
 
@@ -261,18 +260,19 @@ public static class NxSceneExporterEditor
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneOSX"), builds, BuildTarget.StandaloneOSX);
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneLinux64"), builds, BuildTarget.StandaloneLinux64);
 
-            var manifest = new NxSceneManifest
+            var manifest = new NxSceneManifestData
             {
-                version = "1",
+                version = "2",
                 sceneName = folderName,
+                layerNames = CaptureLayerNames(),
                 prefabs = prefabs.ToArray(),
-                instances = new NxSceneInstance[0]
+                instances = new NxSceneInstanceData[0]
             };
 
             string manifestPath = Path.Combine(tempDir, "manifest.json");
             File.WriteAllText(manifestPath, JsonUtility.ToJson(manifest));
 
-            CreateZip(outputPath, tempDir, manifest);
+            CreateZip(outputPath, tempDir);
             EditorUtility.RevealInFinder(outputPath);
         }
         finally
@@ -290,13 +290,23 @@ public static class NxSceneExporterEditor
         }
     }
 
+    private static string[] CaptureLayerNames()
+    {
+        var names = new string[32];
+        for (int i = 0; i < names.Length; i++)
+        {
+            names[i] = LayerMask.LayerToName(i);
+        }
+        return names;
+    }
+
     private static void BuildForPlatform(string outputDir, AssetBundleBuild[] builds, BuildTarget target)
     {
         Directory.CreateDirectory(outputDir);
         BuildPipeline.BuildAssetBundles(outputDir, builds, BuildAssetBundleOptions.ChunkBasedCompression, target);
     }
 
-    private static void CreateZip(string outputZipPath, string tempDir, NxSceneManifest manifest)
+    private static void CreateZip(string outputZipPath, string tempDir)
     {
         if (File.Exists(outputZipPath))
         {
@@ -329,7 +339,7 @@ public static class NxSceneExporterEditor
 
     private static void AddFileToZip(ZipArchive archive, string filePath, string entryName)
     {
-        var entry = archive.CreateEntry(entryName, System.IO.Compression.CompressionLevel.Optimal);
+        var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
         using var entryStream = entry.Open();
         using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
         fileStream.CopyTo(entryStream);
@@ -491,7 +501,7 @@ public static class NxSceneExporterEditor
                propertyPath.StartsWith("m_LocalEulerAnglesHint", StringComparison.Ordinal);
     }
 
-    private static string GetPrefabPathByGuid(Dictionary<string, NxScenePrefab> prefabsByPath, string guid)
+    private static string GetPrefabPathByGuid(Dictionary<string, NxScenePrefabData> prefabsByPath, string guid)
     {
         foreach (var kv in prefabsByPath)
         {
@@ -503,7 +513,7 @@ public static class NxSceneExporterEditor
         return null;
     }
 
-    private static string GetBundleFileName(NxScenePrefab prefab)
+    private static string GetBundleFileName(NxScenePrefabData prefab)
     {
         string shortId = string.IsNullOrEmpty(prefab.id) ? Guid.NewGuid().ToString("N").Substring(0, 8) : prefab.id.Substring(0, 8);
         string name = SanitizeFileName(prefab.name);
@@ -570,6 +580,43 @@ public static class NxSceneExporterEditor
         }
 
         return Application.dataPath;
+    }
+
+    [Serializable]
+    private class NxSceneManifestData
+    {
+        public string version;
+        public string sceneName;
+        public string[] layerNames;
+        public NxScenePrefabData[] prefabs;
+        public NxSceneInstanceData[] instances;
+    }
+
+    [Serializable]
+    private class NxScenePrefabData
+    {
+        public string id;
+        public string name;
+        public NxScenePlatformBundleData[] bundles;
+    }
+
+    [Serializable]
+    private class NxScenePlatformBundleData
+    {
+        public string platform;
+        public string path;
+    }
+
+    [Serializable]
+    private class NxSceneInstanceData
+    {
+        public string name;
+        public string prefabId;
+        public int parentIndex;
+        public string parentPath;
+        public Vector3 localPosition;
+        public Quaternion localRotation;
+        public Vector3 localScale;
     }
 }
 #endif
