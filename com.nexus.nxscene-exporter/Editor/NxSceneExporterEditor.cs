@@ -6,12 +6,21 @@ using System.IO.Compression;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.SceneManagement;
+using Nexus.NxScene;
 
-public static class NxSceneExporterWithLayersEditor
+public static class NxSceneExporterEditor
 {
-    [MenuItem("Tools/Nexus/Export/Export Current Scene (.nxscene + Layers)", false, 2000)]
+    [MenuItem("Tools/Nexus/Export/Export Current Scene (.nxscene)", false, 2000)]
+    [MenuItem("Tools/Nexus/Export/Export Current Scene (.nxscene)", false, 2000)]
     public static void ExportCurrentScene()
     {
+        if (UnityEngine.Rendering.GraphicsSettings.renderPipelineAsset != null)
+        {
+            EditorUtility.DisplayDialog("Pipeline Error", "URP/HDRP Detected. Please switch to the Built-in Render Pipeline for Nexus compatibility.", "OK");
+            return;
+        }
+
         var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
         string sceneName = string.IsNullOrEmpty(scene.name) ? "Scene" : scene.name;
 
@@ -29,17 +38,50 @@ public static class NxSceneExporterWithLayersEditor
         EnsureAssetFolder(tempAssetsDir);
 
         var createdTempAssets = new List<string>();
+        List<GameObject> mergedObjects = null;
 
         try
         {
-            var exportRoots = scene.GetRootGameObjects()
+            var rawRoots = scene.GetRootGameObjects()
                 .Where(go => go != null)
                 .Where(go => go.hideFlags == HideFlags.None)
                 .ToArray();
 
-            var prefabPathByRoot = new Dictionary<GameObject, string>();
-            foreach (var root in exportRoots)
+            // --- Merging Logic ---
+            var finalExportRoots = new List<GameObject>();
+            var objectsToMerge = new List<GameObject>();
+
+            foreach (var root in rawRoots)
             {
+                string layerName = LayerMask.LayerToName(root.layer);
+                bool isStatic = root.isStatic; // Checks for any static flag.
+                
+                // Exclude special layers from merging
+                bool isSpecialLayer = (layerName == "Door" || layerName == "Ground" || layerName == "Interactable");
+
+                if (isStatic && !isSpecialLayer)
+                {
+                    objectsToMerge.Add(root);
+                }
+                else
+                {
+                    finalExportRoots.Add(root);
+                }
+            }
+
+            mergedObjects = MergeStaticObjects(objectsToMerge, tempAssetsDir, createdTempAssets);
+            finalExportRoots.AddRange(mergedObjects);
+            // ---------------------
+
+            var prefabPathByRoot = new Dictionary<GameObject, string>();
+            int currentStep = 0;
+            int totalSteps = finalExportRoots.Count;
+
+            foreach (var root in finalExportRoots)
+            {
+                EditorUtility.DisplayProgressBar("Exporting NxScene", $"Processing {root.name}...", (float)currentStep / totalSteps);
+                currentStep++;
+
                 string prefabPath = ResolveOrCreatePrefabAssetPath(root, tempAssetsDir, createdTempAssets);
                 if (string.IsNullOrEmpty(prefabPath))
                 {
@@ -48,7 +90,7 @@ public static class NxSceneExporterWithLayersEditor
                 prefabPathByRoot[root] = prefabPath;
             }
 
-            var prefabEntriesByPath = new Dictionary<string, NxScenePrefabData>(StringComparer.OrdinalIgnoreCase);
+            var prefabEntriesByPath = new Dictionary<string, NxScenePrefab>(StringComparer.OrdinalIgnoreCase);
             foreach (var kv in prefabPathByRoot)
             {
                 string prefabPath = kv.Value;
@@ -60,18 +102,18 @@ public static class NxSceneExporterWithLayersEditor
                 string guid = AssetDatabase.AssetPathToGUID(prefabPath);
                 string name = Path.GetFileNameWithoutExtension(prefabPath);
 
-                prefabEntriesByPath[prefabPath] = new NxScenePrefabData
+                prefabEntriesByPath[prefabPath] = new NxScenePrefab
                 {
                     id = guid,
                     name = name,
-                    bundles = new NxScenePlatformBundleData[0]
+                    bundles = new NxScenePlatformBundle[0]
                 };
             }
 
             var prefabs = prefabEntriesByPath.Values.OrderBy(p => p.name).ToArray();
-            var instances = new List<NxSceneInstanceData>();
+            var instances = new List<NxSceneInstance>();
 
-            foreach (var root in exportRoots)
+            foreach (var root in finalExportRoots)
             {
                 if (!prefabPathByRoot.TryGetValue(root, out var prefabPath))
                 {
@@ -79,10 +121,12 @@ public static class NxSceneExporterWithLayersEditor
                 }
 
                 var prefab = prefabEntriesByPath[prefabPath];
+                string layerName = LayerMask.LayerToName(root.layer);
 
-                instances.Add(new NxSceneInstanceData
+                instances.Add(new NxSceneInstance
                 {
                     name = root.name,
+                    layer = layerName,
                     prefabId = prefab.id,
                     parentIndex = -1,
                     parentPath = null,
@@ -101,31 +145,32 @@ public static class NxSceneExporterWithLayersEditor
                 assetNames = new[] { GetPrefabPathByGuid(prefabEntriesByPath, p.id) }
             }).ToArray();
 
-            var manifestPrefabs = new List<NxScenePrefabData>();
+            var manifestPrefabs = new List<NxScenePrefab>();
             foreach (var p in prefabs)
             {
-                manifestPrefabs.Add(new NxScenePrefabData
+                manifestPrefabs.Add(new NxScenePrefab
                 {
                     id = p.id,
                     name = p.name,
                     bundles = new[]
                     {
-                        new NxScenePlatformBundleData { platform = "StandaloneWindows64", path = $"bundles/StandaloneWindows64/{GetBundleFileName(p)}" },
-                        new NxScenePlatformBundleData { platform = "StandaloneOSX", path = $"bundles/StandaloneOSX/{GetBundleFileName(p)}" },
-                        new NxScenePlatformBundleData { platform = "StandaloneLinux64", path = $"bundles/StandaloneLinux64/{GetBundleFileName(p)}" },
+                        new NxScenePlatformBundle { platform = "StandaloneWindows64", path = $"bundles/StandaloneWindows64/{GetBundleFileName(p)}" },
+                        new NxScenePlatformBundle { platform = "StandaloneOSX", path = $"bundles/StandaloneOSX/{GetBundleFileName(p)}" },
+                        new NxScenePlatformBundle { platform = "StandaloneLinux64", path = $"bundles/StandaloneLinux64/{GetBundleFileName(p)}" },
                     }
                 });
             }
+
+            EditorUtility.DisplayProgressBar("Exporting NxScene", "Building AssetBundles...", 1.0f);
 
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneWindows64"), builds, BuildTarget.StandaloneWindows64);
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneOSX"), builds, BuildTarget.StandaloneOSX);
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneLinux64"), builds, BuildTarget.StandaloneLinux64);
 
-            var manifest = new NxSceneManifestData
+            var manifest = new NxSceneManifest
             {
-                version = "2",
+                version = "1",
                 sceneName = sceneName,
-                layerNames = CaptureLayerNames(),
                 prefabs = manifestPrefabs.ToArray(),
                 instances = instances.ToArray()
             };
@@ -133,12 +178,33 @@ public static class NxSceneExporterWithLayersEditor
             string manifestPath = Path.Combine(tempDir, "manifest.json");
             File.WriteAllText(manifestPath, JsonUtility.ToJson(manifest));
 
-            CreateZip(outputPath, tempDir);
+            CreateZip(outputPath, tempDir, manifest);
 
+            EditorUtility.ClearProgressBar();
             EditorUtility.RevealInFinder(outputPath);
+        }
+        catch (Exception e)
+        {
+            EditorUtility.ClearProgressBar();
+            Debug.LogError($"NxScene Export Failed: {e}");
+            EditorUtility.DisplayDialog("Export Failed", $"An error occurred: {e.Message}", "OK");
         }
         finally
         {
+            EditorUtility.ClearProgressBar();
+            
+            // Cleanup merged temporary objects in scene
+            if (mergedObjects != null)
+            {
+                foreach (var obj in mergedObjects)
+                {
+                    if (obj != null)
+                    {
+                        UnityEngine.Object.DestroyImmediate(obj);
+                    }
+                }
+            }
+
             try
             {
                 if (Directory.Exists(tempDir))
@@ -163,7 +229,101 @@ public static class NxSceneExporterWithLayersEditor
         }
     }
 
-    [MenuItem("Tools/Nexus/Export/Export Prefab Folder (.nxscene + Layers)", false, 2001)]
+    private static List<GameObject> MergeStaticObjects(List<GameObject> roots, string tempAssetsDir, List<string> createdTempAssets)
+    {
+        var result = new List<GameObject>();
+        var groupedByMaterial = new Dictionary<Material, List<CombineInstance>>();
+        var firstObjectByMaterial = new Dictionary<Material, GameObject>(); // To get layer/tag from representative
+
+        // 1. Collect meshes
+        foreach (var root in roots)
+        {
+            var filters = root.GetComponentsInChildren<MeshFilter>();
+            foreach (var mf in filters)
+            {
+                var mr = mf.GetComponent<MeshRenderer>();
+                if (mr == null || mr.sharedMaterial == null) continue;
+
+                var mat = mr.sharedMaterial;
+                if (!groupedByMaterial.ContainsKey(mat))
+                {
+                    groupedByMaterial[mat] = new List<CombineInstance>();
+                    firstObjectByMaterial[mat] = root;
+                }
+
+                var combine = new CombineInstance();
+                combine.mesh = mf.sharedMesh;
+                combine.transform = mf.transform.localToWorldMatrix;
+                groupedByMaterial[mat].Add(combine);
+            }
+        }
+
+        // 2. Perform Combine
+        foreach (var kvp in groupedByMaterial)
+        {
+            var material = kvp.Key;
+            var combines = kvp.Value;
+            var representative = firstObjectByMaterial[material];
+
+            try 
+            {
+                // Create combined mesh
+                var combinedMesh = new Mesh();
+                // 16-bit indices are limited to 65k vertices. Switch to 32-bit if needed, or split.
+                // For simplicity here, we assume standard usage, but let's toggle index format if large.
+                long vertexCount = 0;
+                foreach(var c in combines) vertexCount += c.mesh.vertexCount;
+                
+                if (vertexCount > 65000)
+                    combinedMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+
+                combinedMesh.CombineMeshes(combines.ToArray(), true, true);
+                
+                // Save mesh asset
+                string meshName = $"CombinedMesh_{material.name}_{Guid.NewGuid().ToString("N").Substring(0,6)}";
+                string meshPath = $"{tempAssetsDir}/{meshName}.asset";
+                AssetDatabase.CreateAsset(combinedMesh, meshPath);
+                createdTempAssets.Add(meshPath);
+
+                // Create combined GameObject
+                var go = new GameObject($"Combined_{material.name}");
+                go.layer = representative.layer; // Inherit layer (likely Default since we excluded others)
+                go.transform.position = Vector3.zero;
+                go.transform.rotation = Quaternion.identity;
+                go.transform.localScale = Vector3.one;
+                
+                var mf = go.AddComponent<MeshFilter>();
+                mf.sharedMesh = combinedMesh;
+
+                var mr = go.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = material;
+                
+                // Create Prefab
+                string prefabPath = AssetDatabase.GenerateUniqueAssetPath($"{tempAssetsDir}/{go.name}.prefab");
+                var prefab = PrefabUtility.SaveAsPrefabAsset(go, prefabPath);
+                createdTempAssets.Add(prefabPath);
+                
+                // Instantiate to be used in export list (will be destroyed by finally block cleanup via createdTempAssets tracking? 
+                // Wait, createdTempAssets deletes ASSETS on disk. 
+                // formatting in export logic expects a scene root for ResolveOrCreatePrefabAssetPath... 
+                // We shouldn't destroy 'go' yet if we need it for export step. 
+                // Actually, ExportCurrentScene creates Temp assets, then uses them. 
+                // We returned a new Prefab ASSET path. We need a Scene instance of it to pass to the rest of the pipeline?
+                // The rest of the pipeline iterates 'finalExportRoots' (GameObjects in scene).
+                // So we should keep 'go' in the scene.
+                
+                result.Add(go);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"Failed to merge objects for material {material.name}: {ex}");
+            }
+        }
+
+        return result;
+    }
+
+    [MenuItem("Tools/Nexus/Export/Export Prefab Folder (.nxscene)", false, 2001)]
     public static void ExportPrefabFolder()
     {
         string folderPath = TryGetSelectedProjectFolderPath();
@@ -213,7 +373,7 @@ public static class NxSceneExporterWithLayersEditor
                 .OrderBy(p => p)
                 .ToArray();
 
-            var prefabs = new List<NxScenePrefabData>();
+            var prefabs = new List<NxScenePrefab>();
             var prefabPathByGuid = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             for (int i = 0; i < prefabPaths.Length; i++)
@@ -226,15 +386,15 @@ public static class NxSceneExporterWithLayersEditor
                 }
 
                 string name = Path.GetFileNameWithoutExtension(prefabPath);
-                prefabs.Add(new NxScenePrefabData
+                prefabs.Add(new NxScenePrefab
                 {
                     id = guid,
                     name = name,
                     bundles = new[]
                     {
-                        new NxScenePlatformBundleData { platform = "StandaloneWindows64", path = $"bundles/StandaloneWindows64/{GetBundleFileName(new NxScenePrefabData { id = guid, name = name })}" },
-                        new NxScenePlatformBundleData { platform = "StandaloneOSX", path = $"bundles/StandaloneOSX/{GetBundleFileName(new NxScenePrefabData { id = guid, name = name })}" },
-                        new NxScenePlatformBundleData { platform = "StandaloneLinux64", path = $"bundles/StandaloneLinux64/{GetBundleFileName(new NxScenePrefabData { id = guid, name = name })}" },
+                        new NxScenePlatformBundle { platform = "StandaloneWindows64", path = $"bundles/StandaloneWindows64/{GetBundleFileName(new NxScenePrefab { id = guid, name = name })}" },
+                        new NxScenePlatformBundle { platform = "StandaloneOSX", path = $"bundles/StandaloneOSX/{GetBundleFileName(new NxScenePrefab { id = guid, name = name })}" },
+                        new NxScenePlatformBundle { platform = "StandaloneLinux64", path = $"bundles/StandaloneLinux64/{GetBundleFileName(new NxScenePrefab { id = guid, name = name })}" },
                     }
                 });
 
@@ -260,19 +420,18 @@ public static class NxSceneExporterWithLayersEditor
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneOSX"), builds, BuildTarget.StandaloneOSX);
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneLinux64"), builds, BuildTarget.StandaloneLinux64);
 
-            var manifest = new NxSceneManifestData
+            var manifest = new NxSceneManifest
             {
-                version = "2",
+                version = "1",
                 sceneName = folderName,
-                layerNames = CaptureLayerNames(),
                 prefabs = prefabs.ToArray(),
-                instances = new NxSceneInstanceData[0]
+                instances = new NxSceneInstance[0]
             };
 
             string manifestPath = Path.Combine(tempDir, "manifest.json");
             File.WriteAllText(manifestPath, JsonUtility.ToJson(manifest));
 
-            CreateZip(outputPath, tempDir);
+            CreateZip(outputPath, tempDir, manifest);
             EditorUtility.RevealInFinder(outputPath);
         }
         finally
@@ -290,23 +449,13 @@ public static class NxSceneExporterWithLayersEditor
         }
     }
 
-    private static string[] CaptureLayerNames()
-    {
-        var names = new string[32];
-        for (int i = 0; i < names.Length; i++)
-        {
-            names[i] = LayerMask.LayerToName(i);
-        }
-        return names;
-    }
-
     private static void BuildForPlatform(string outputDir, AssetBundleBuild[] builds, BuildTarget target)
     {
         Directory.CreateDirectory(outputDir);
         BuildPipeline.BuildAssetBundles(outputDir, builds, BuildAssetBundleOptions.ChunkBasedCompression, target);
     }
 
-    private static void CreateZip(string outputZipPath, string tempDir)
+    private static void CreateZip(string outputZipPath, string tempDir, NxSceneManifest manifest)
     {
         if (File.Exists(outputZipPath))
         {
@@ -339,7 +488,7 @@ public static class NxSceneExporterWithLayersEditor
 
     private static void AddFileToZip(ZipArchive archive, string filePath, string entryName)
     {
-        var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
+        var entry = archive.CreateEntry(entryName, System.IO.Compression.CompressionLevel.Optimal);
         using var entryStream = entry.Open();
         using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
         fileStream.CopyTo(entryStream);
@@ -501,7 +650,7 @@ public static class NxSceneExporterWithLayersEditor
                propertyPath.StartsWith("m_LocalEulerAnglesHint", StringComparison.Ordinal);
     }
 
-    private static string GetPrefabPathByGuid(Dictionary<string, NxScenePrefabData> prefabsByPath, string guid)
+    private static string GetPrefabPathByGuid(Dictionary<string, NxScenePrefab> prefabsByPath, string guid)
     {
         foreach (var kv in prefabsByPath)
         {
@@ -513,7 +662,7 @@ public static class NxSceneExporterWithLayersEditor
         return null;
     }
 
-    private static string GetBundleFileName(NxScenePrefabData prefab)
+    private static string GetBundleFileName(NxScenePrefab prefab)
     {
         string shortId = string.IsNullOrEmpty(prefab.id) ? Guid.NewGuid().ToString("N").Substring(0, 8) : prefab.id.Substring(0, 8);
         string name = SanitizeFileName(prefab.name);
@@ -580,43 +729,6 @@ public static class NxSceneExporterWithLayersEditor
         }
 
         return Application.dataPath;
-    }
-
-    [Serializable]
-    private class NxSceneManifestData
-    {
-        public string version;
-        public string sceneName;
-        public string[] layerNames;
-        public NxScenePrefabData[] prefabs;
-        public NxSceneInstanceData[] instances;
-    }
-
-    [Serializable]
-    private class NxScenePrefabData
-    {
-        public string id;
-        public string name;
-        public NxScenePlatformBundleData[] bundles;
-    }
-
-    [Serializable]
-    private class NxScenePlatformBundleData
-    {
-        public string platform;
-        public string path;
-    }
-
-    [Serializable]
-    private class NxSceneInstanceData
-    {
-        public string name;
-        public string prefabId;
-        public int parentIndex;
-        public string parentPath;
-        public Vector3 localPosition;
-        public Quaternion localRotation;
-        public Vector3 localScale;
     }
 }
 #endif

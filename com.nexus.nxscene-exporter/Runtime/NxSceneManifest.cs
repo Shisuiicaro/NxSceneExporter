@@ -8,7 +8,6 @@ namespace Nexus.NxScene
     {
         public string version;
         public string sceneName;
-        public string[] layerNames;
         public NxScenePrefab[] prefabs;
         public NxSceneInstance[] instances;
     }
@@ -32,6 +31,7 @@ namespace Nexus.NxScene
     public class NxSceneInstance
     {
         public string name;
+        public string layer;
         public string prefabId;
         public int parentIndex;
         public string parentPath;
