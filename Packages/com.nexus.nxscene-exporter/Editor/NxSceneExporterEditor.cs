@@ -12,12 +12,16 @@ using Nexus.NxScene;
 public static class NxSceneExporterEditor
 {
     [MenuItem("Tools/Nexus/Export/Export Current Scene (.nxscene)", false, 2000)]
-    [MenuItem("Tools/Nexus/Export/Export Current Scene (.nxscene)", false, 2000)]
     public static void ExportCurrentScene()
     {
         if (UnityEngine.Rendering.GraphicsSettings.renderPipelineAsset != null)
         {
             EditorUtility.DisplayDialog("Pipeline Error", "URP/HDRP Detected. Please switch to the Built-in Render Pipeline for Nexus compatibility.", "OK");
+            return;
+        }
+
+        if (!CheckExportPlatforms())
+        {
             return;
         }
 
@@ -155,7 +159,6 @@ public static class NxSceneExporterEditor
                     bundles = new[]
                     {
                         new NxScenePlatformBundle { platform = "StandaloneWindows64", path = $"bundles/StandaloneWindows64/{GetBundleFileName(p)}" },
-                        new NxScenePlatformBundle { platform = "StandaloneOSX", path = $"bundles/StandaloneOSX/{GetBundleFileName(p)}" },
                         new NxScenePlatformBundle { platform = "StandaloneLinux64", path = $"bundles/StandaloneLinux64/{GetBundleFileName(p)}" },
                     }
                 });
@@ -164,7 +167,6 @@ public static class NxSceneExporterEditor
             EditorUtility.DisplayProgressBar("Exporting NxScene", "Building AssetBundles...", 1.0f);
 
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneWindows64"), builds, BuildTarget.StandaloneWindows64);
-            BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneOSX"), builds, BuildTarget.StandaloneOSX);
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneLinux64"), builds, BuildTarget.StandaloneLinux64);
 
             var manifest = new NxSceneManifest
@@ -177,6 +179,9 @@ public static class NxSceneExporterEditor
 
             string manifestPath = Path.Combine(tempDir, "manifest.json");
             File.WriteAllText(manifestPath, JsonUtility.ToJson(manifest));
+
+            string thumbnailPath = Path.Combine(tempDir, "thumbnail.png");
+            TryCaptureThumbnail(thumbnailPath);
 
             CreateZip(outputPath, tempDir, manifest);
 
@@ -326,6 +331,11 @@ public static class NxSceneExporterEditor
     [MenuItem("Tools/Nexus/Export/Export Prefab Folder (.nxscene)", false, 2001)]
     public static void ExportPrefabFolder()
     {
+        if (!CheckExportPlatforms())
+        {
+            return;
+        }
+
         string folderPath = TryGetSelectedProjectFolderPath();
         if (string.IsNullOrEmpty(folderPath))
         {
@@ -393,7 +403,6 @@ public static class NxSceneExporterEditor
                     bundles = new[]
                     {
                         new NxScenePlatformBundle { platform = "StandaloneWindows64", path = $"bundles/StandaloneWindows64/{GetBundleFileName(new NxScenePrefab { id = guid, name = name })}" },
-                        new NxScenePlatformBundle { platform = "StandaloneOSX", path = $"bundles/StandaloneOSX/{GetBundleFileName(new NxScenePrefab { id = guid, name = name })}" },
                         new NxScenePlatformBundle { platform = "StandaloneLinux64", path = $"bundles/StandaloneLinux64/{GetBundleFileName(new NxScenePrefab { id = guid, name = name })}" },
                     }
                 });
@@ -417,7 +426,6 @@ public static class NxSceneExporterEditor
             }).Where(b => b.assetNames != null && b.assetNames.Length == 1 && !string.IsNullOrEmpty(b.assetNames[0])).ToArray();
 
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneWindows64"), builds, BuildTarget.StandaloneWindows64);
-            BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneOSX"), builds, BuildTarget.StandaloneOSX);
             BuildForPlatform(Path.Combine(bundlesRoot, "StandaloneLinux64"), builds, BuildTarget.StandaloneLinux64);
 
             var manifest = new NxSceneManifest
@@ -449,6 +457,57 @@ public static class NxSceneExporterEditor
         }
     }
 
+    private static bool CheckExportPlatforms()
+    {
+        foreach (var target in new[] { BuildTarget.StandaloneWindows64, BuildTarget.StandaloneLinux64 })
+        {
+            var backend = PlayerSettings.GetScriptingBackend(target);
+            if (backend != ScriptingImplementation.IL2CPP)
+            {
+                EditorUtility.DisplayDialog("IL2CPP Required",
+                    $"Export blocked: target {target} uses {backend}, marketplace maps require IL2CPP.\n" +
+                    "Player Settings → Scripting Backend → set to IL2CPP for both Windows and Linux.",
+                    "OK");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static void TryCaptureThumbnail(string outPath)
+    {
+        try
+        {
+            var cam = UnityEngine.Object.FindObjectsOfType<Camera>().FirstOrDefault(c => c != null && c.isActiveAndEnabled);
+            if (cam == null)
+            {
+                Debug.LogWarning("[NxSceneExporter] No active camera in scene, skipping thumbnail");
+                return;
+            }
+
+            var prevTarget = cam.targetTexture;
+            var rt = new RenderTexture(640, 360, 24);
+            cam.targetTexture = rt;
+            cam.Render();
+
+            RenderTexture.active = rt;
+            var tex = new Texture2D(640, 360, TextureFormat.RGB24, false);
+            tex.ReadPixels(new Rect(0, 0, 640, 360), 0, 0);
+            tex.Apply();
+            RenderTexture.active = null;
+
+            cam.targetTexture = prevTarget;
+            File.WriteAllBytes(outPath, tex.EncodeToPNG());
+
+            UnityEngine.Object.DestroyImmediate(tex);
+            UnityEngine.Object.DestroyImmediate(rt);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[NxSceneExporter] Thumbnail capture failed: {ex.Message}");
+        }
+    }
+
     private static void BuildForPlatform(string outputDir, AssetBundleBuild[] builds, BuildTarget target)
     {
         Directory.CreateDirectory(outputDir);
@@ -466,6 +525,12 @@ public static class NxSceneExporterEditor
         using var archive = new ZipArchive(fs, ZipArchiveMode.Create);
 
         AddFileToZip(archive, Path.Combine(tempDir, "manifest.json"), "manifest.json");
+
+        string thumbPath = Path.Combine(tempDir, "thumbnail.png");
+        if (File.Exists(thumbPath))
+        {
+            AddFileToZip(archive, thumbPath, "thumbnail.png");
+        }
 
         string bundlesDir = Path.Combine(tempDir, "bundles");
         if (Directory.Exists(bundlesDir))
