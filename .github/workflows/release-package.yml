@@ -1,0 +1,35 @@
+name: Package NxScene Exporter
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Build release package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="Packages/com.nexus.nxscene-exporter"
+          package_version="$(jq -r '.version' "$package_dir/package.json")"
+          release_version="${GITHUB_REF_NAME#v}"
+          if [[ "$package_version" != "$release_version" ]]; then
+            echo "Release tag $GITHUB_REF_NAME does not match package version $package_version"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/nxscene-release"
+          (cd Packages && zip -qr "$RUNNER_TEMP/nxscene-release/NxSceneExporter.zip" com.nexus.nxscene-exporter)
+
+      - name: Upload package to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "$RUNNER_TEMP/nxscene-release/NxSceneExporter.zip" --clobber

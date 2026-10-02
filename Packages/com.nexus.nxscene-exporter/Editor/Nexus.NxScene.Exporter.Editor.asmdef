@@ -1,12 +1,8 @@
 {
   "name": "Nexus.NxScene.Exporter.Editor",
-  "rootNamespace": "",
-  "references": [
-    "Nexus.NxScene.Exporter.Runtime"
-  ],
-  "includePlatforms": [
-    "Editor"
-  ],
+  "rootNamespace": "Nexus.NxScene",
+  "references": ["Nexus.NxScene.Exporter.Runtime"],
+  "includePlatforms": ["Editor"],
   "excludePlatforms": [],
   "allowUnsafeCode": false,
   "overrideReferences": false,
