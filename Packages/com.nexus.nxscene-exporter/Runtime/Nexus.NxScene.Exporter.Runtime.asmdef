@@ -1,6 +1,6 @@
 {
   "name": "Nexus.NxScene.Exporter.Runtime",
-  "rootNamespace": "",
+  "rootNamespace": "Nexus.NxScene",
   "references": [],
   "includePlatforms": [],
   "excludePlatforms": [],
