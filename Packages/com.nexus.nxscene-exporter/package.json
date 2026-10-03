@@ -1,6 +1,6 @@
 {
   "name": "com.nexus.nxscene-exporter",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "displayName": "Nexus Scene Exporter",
   "description": "Portable Nexus scene packages for URP projects.",
   "unity": "2022.3",
