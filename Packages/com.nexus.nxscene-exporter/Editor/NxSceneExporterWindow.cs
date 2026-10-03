@@ -31,6 +31,12 @@ namespace Nexus.NxScene.Editor
             public string name;
         }
 
+        private sealed class ModelReadabilityState
+        {
+            public string path;
+            public bool wasReadable;
+        }
+
         private static readonly Dictionary<string, string> English = new Dictionary<string, string>
         {
             { "title", "Nexus Scene Exporter" },
@@ -380,15 +386,23 @@ namespace Nexus.NxScene.Editor
                     isFoliage = item.source.GetComponent<NxSceneFoliageTag>() != null || item.source.GetComponentInChildren<NxSceneFoliageTag>(true) != null,
                     bundles = targets.Select(target => new NxScenePlatformBundle { platform = target.Item1, path = "bundles/" + target.Item1 + "/" + bundleFileName, asset = item.assetPath.Replace('\\', '/').ToLowerInvariant() }).ToArray()
                 }).ToArray();
-                foreach (var target in targets)
+                var readabilityStates = MakeSourceMeshesReadable(assetItems);
+                try
                 {
-                    string platformLabel = target.Item2 == BuildTarget.StandaloneWindows64 ? T("windows") : T("linux");
-                    EditorUtility.DisplayProgressBar(T("exporting"), string.Format(T("building"), platformLabel), 0.5f);
-                    string targetRoot = Path.Combine(bundlesRoot, target.Item1);
-                    Directory.CreateDirectory(targetRoot);
-                    var builds = new[] { new AssetBundleBuild { assetBundleName = bundleFileName, assetNames = assetItems.Select(item => item.assetPath).ToArray() } };
-                    var bundleManifest = BuildPipeline.BuildAssetBundles(targetRoot, builds, BuildAssetBundleOptions.ChunkBasedCompression, target.Item2);
-                    if (bundleManifest == null || builds.Any(build => !File.Exists(Path.Combine(targetRoot, build.assetBundleName)))) throw new InvalidOperationException(string.Format(T("bundleBuildFailed"), platformLabel));
+                    foreach (var target in targets)
+                    {
+                        string platformLabel = target.Item2 == BuildTarget.StandaloneWindows64 ? T("windows") : T("linux");
+                        EditorUtility.DisplayProgressBar(T("exporting"), string.Format(T("building"), platformLabel), 0.5f);
+                        string targetRoot = Path.Combine(bundlesRoot, target.Item1);
+                        Directory.CreateDirectory(targetRoot);
+                        var builds = new[] { new AssetBundleBuild { assetBundleName = bundleFileName, assetNames = assetItems.Select(item => item.assetPath).ToArray() } };
+                        var bundleManifest = BuildPipeline.BuildAssetBundles(targetRoot, builds, BuildAssetBundleOptions.ChunkBasedCompression, target.Item2);
+                        if (bundleManifest == null || builds.Any(build => !File.Exists(Path.Combine(targetRoot, build.assetBundleName)))) throw new InvalidOperationException(string.Format(T("bundleBuildFailed"), platformLabel));
+                    }
+                }
+                finally
+                {
+                    RestoreSourceMeshReadability(readabilityStates);
                 }
 
                 string packageName = string.IsNullOrWhiteSpace(m_packageName) ? T("packageDefault") : m_packageName.Trim();
@@ -627,6 +641,53 @@ namespace Nexus.NxScene.Editor
         private static bool RequiresScriptStrip(GameObject root)
         {
             return root.GetComponentsInChildren<MonoBehaviour>(true).Any(component => component != null);
+        }
+
+        private static List<ModelReadabilityState> MakeSourceMeshesReadable(List<ExportItem> items)
+        {
+            var states = new List<ModelReadabilityState>();
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in items)
+            {
+                foreach (var meshFilter in item.source.GetComponentsInChildren<MeshFilter>(true))
+                {
+                    if (meshFilter != null && meshFilter.sharedMesh != null) paths.Add(AssetDatabase.GetAssetPath(meshFilter.sharedMesh));
+                }
+                foreach (var renderer in item.source.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+                {
+                    if (renderer != null && renderer.sharedMesh != null) paths.Add(AssetDatabase.GetAssetPath(renderer.sharedMesh));
+                }
+            }
+
+            try
+            {
+                foreach (var path in paths)
+                {
+                    if (string.IsNullOrEmpty(path)) continue;
+                    var importer = AssetImporter.GetAtPath(path) as ModelImporter;
+                    if (importer == null || importer.isReadable) continue;
+                    states.Add(new ModelReadabilityState { path = path, wasReadable = importer.isReadable });
+                    importer.isReadable = true;
+                    importer.SaveAndReimport();
+                }
+            }
+            catch
+            {
+                RestoreSourceMeshReadability(states);
+                throw;
+            }
+            return states;
+        }
+
+        private static void RestoreSourceMeshReadability(List<ModelReadabilityState> states)
+        {
+            foreach (var state in states)
+            {
+                var importer = AssetImporter.GetAtPath(state.path) as ModelImporter;
+                if (importer == null || importer.isReadable == state.wasReadable) continue;
+                importer.isReadable = state.wasReadable;
+                importer.SaveAndReimport();
+            }
         }
 
         private static void StripScripts(GameObject root)
