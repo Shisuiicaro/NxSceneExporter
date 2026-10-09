@@ -73,8 +73,8 @@ namespace Nexus.NxScene.Editor
             { "urpRequired", "A URP render pipeline is required" },
             { "compiling", "Wait for Unity to finish compiling" },
             { "scriptCompilationFailed", "Project scripts contain errors" },
-            { "windowsSupportMissing", "Windows export support is missing" },
-            { "linuxSupportMissing", "Linux export support is missing" },
+            { "windowsSupportMissing", "Install Windows Build Support in Unity Hub" },
+            { "linuxSupportMissing", "Install Linux Build Support in Unity Hub" },
             { "bundleBuildFailed", "The {0} bundle could not be created" },
             { "idRequired", "Package ID is required" },
             { "idInvalid", "Package ID uses letters, numbers, dots, and hyphens" },
@@ -130,8 +130,8 @@ namespace Nexus.NxScene.Editor
             { "urpRequired", "Um pipeline URP é necessário" },
             { "compiling", "Aguarde a compilação do Unity" },
             { "scriptCompilationFailed", "Os scripts do projeto têm erros" },
-            { "windowsSupportMissing", "O suporte de exportação para Windows está ausente" },
-            { "linuxSupportMissing", "O suporte de exportação para Linux está ausente" },
+            { "windowsSupportMissing", "Instale o suporte de compilação do Windows pelo Unity Hub" },
+            { "linuxSupportMissing", "Instale o suporte de compilação do Linux pelo Unity Hub" },
             { "bundleBuildFailed", "Não foi possível criar o bundle {0}" },
             { "idRequired", "O ID do pacote é necessário" },
             { "idInvalid", "Use letras, números, pontos e hífens no ID" },
@@ -533,7 +533,7 @@ namespace Nexus.NxScene.Editor
             clone.SetActive(source.activeSelf);
             foreach (var component in source.GetComponents<Component>())
             {
-                if (component == null || component is Transform || component is MonoBehaviour) continue;
+                if (component == null || component is Transform || component is MonoBehaviour || component is LODGroup) continue;
                 ComponentUtility.CopyComponent(component);
                 ComponentUtility.PasteComponentAsNew(clone);
             }
@@ -617,7 +617,9 @@ namespace Nexus.NxScene.Editor
                     });
                 }
             }
-            return groups.ToArray();
+            var result = groups.ToArray();
+            NxSceneLodOwnership.NormalizeNestedRendererOwnership(result, BuildInstances(items));
+            return result;
         }
 
         private static NxSceneFileEntry[] BuildInventory(string root)
@@ -692,7 +694,7 @@ namespace Nexus.NxScene.Editor
 
         private static void StripScripts(GameObject root)
         {
-            var components = root.GetComponentsInChildren<MonoBehaviour>(true).Where(component => component != null).ToList();
+            var components = root.GetComponentsInChildren<MonoBehaviour>(true).Where(component => component != null && component.GetType().FullName != "UnityEngine.Rendering.Universal.DecalProjector").ToList();
             while (components.Count > 0)
             {
                 var component = components.FirstOrDefault(candidate => !components.Any(other => other != candidate && RequiresComponent(other.GetType(), candidate.GetType())));
