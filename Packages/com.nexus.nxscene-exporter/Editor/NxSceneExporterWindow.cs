@@ -91,7 +91,11 @@ namespace Nexus.NxScene.Editor
             { "sceneName", "Scene" },
             { "packageDefault", "Nexus package" },
             { "defaultAuthor", "Nexus creator" },
-            { "lodRefsInvalid", "An LOD group references an object outside the scene" }
+            { "lodRefsInvalid", "An LOD group references an object outside the scene" },
+            { "materialShaderMissing", "Material {0} has no shader" },
+            { "materialShaderUnsupported", "Material {0} uses an unsupported shader: {1}" },
+            { "bundleMaterialInvalid", "Bundle material {0} cannot load shader {1}" },
+            { "bundleTextureInvalid", "Bundle material {0} lost texture property {1}" }
         };
 
         private static readonly Dictionary<string, string> Portuguese = new Dictionary<string, string>
@@ -148,7 +152,11 @@ namespace Nexus.NxScene.Editor
             { "sceneName", "Cena" },
             { "packageDefault", "Pacote Nexus" },
             { "defaultAuthor", "Criador Nexus" },
-            { "lodRefsInvalid", "Um grupo LOD referencia um objeto fora da cena" }
+            { "lodRefsInvalid", "Um grupo LOD referencia um objeto fora da cena" },
+            { "materialShaderMissing", "O material {0} não possui shader" },
+            { "materialShaderUnsupported", "O material {0} usa um shader incompatível: {1}" },
+            { "bundleMaterialInvalid", "O material {0} não carregou o shader {1} no bundle" },
+            { "bundleTextureInvalid", "O material {0} perdeu a textura {1} no bundle" }
         };
 
         private SourceKind m_source;
@@ -308,6 +316,7 @@ namespace Nexus.NxScene.Editor
             if (m_source == SourceKind.CurrentScene && string.IsNullOrWhiteSpace(SceneManager.GetActiveScene().path)) m_errors.Add(T("sceneUnsaved"));
             var roots = GetRoots();
             if (roots.Count == 0) m_errors.Add(m_source == SourceKind.CurrentScene ? T("sceneUnsaved") : T("noPrefabs"));
+            ValidateMaterialShaders(roots);
             try { BuildLodGroups(roots.Select(root => new ExportItem { source = root }).ToList()); }
             catch { m_errors.Add(T("lodRefsInvalid")); }
             if (roots.Any(RequiresScriptStrip)) m_warnings.Add(T("scriptsRemoved"));
@@ -395,9 +404,11 @@ namespace Nexus.NxScene.Editor
                         EditorUtility.DisplayProgressBar(T("exporting"), string.Format(T("building"), platformLabel), 0.5f);
                         string targetRoot = Path.Combine(bundlesRoot, target.Item1);
                         Directory.CreateDirectory(targetRoot);
-                        var builds = new[] { new AssetBundleBuild { assetBundleName = bundleFileName, assetNames = assetItems.Select(item => item.assetPath).ToArray() } };
+                        var bundleAssetNames = GetBundleAssetNames(assetItems);
+                        var builds = new[] { new AssetBundleBuild { assetBundleName = bundleFileName, assetNames = bundleAssetNames } };
                         var bundleManifest = BuildPipeline.BuildAssetBundles(targetRoot, builds, BuildAssetBundleOptions.ChunkBasedCompression, target.Item2);
                         if (bundleManifest == null || builds.Any(build => !File.Exists(Path.Combine(targetRoot, build.assetBundleName)))) throw new InvalidOperationException(string.Format(T("bundleBuildFailed"), platformLabel));
+                        if (target.Item2 == EditorUserBuildSettings.activeBuildTarget && IsEditorCompatibleBundleTarget(target.Item2)) ValidateBuiltBundle(Path.Combine(targetRoot, bundleFileName), assetItems);
                     }
                 }
                 finally
@@ -462,6 +473,102 @@ namespace Nexus.NxScene.Editor
             if (m_source == SourceKind.CurrentScene) return GetSceneObjects();
             if (!AssetDatabase.IsValidFolder(m_prefabFolder)) return new List<GameObject>();
             return AssetDatabase.FindAssets("t:Prefab", new[] { m_prefabFolder }).Select(AssetDatabase.GUIDToAssetPath).Select(path => AssetDatabase.LoadAssetAtPath<GameObject>(path)).Where(root => root != null).OrderBy(root => root.name, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        private void ValidateMaterialShaders(IEnumerable<GameObject> roots)
+        {
+            foreach (var renderer in roots.Where(root => root != null).SelectMany(root => root.GetComponentsInChildren<Renderer>(true)))
+            {
+                foreach (var material in renderer.sharedMaterials)
+                {
+                    if (material == null) continue;
+                    var shader = material.shader;
+                    if (shader == null)
+                    {
+                        m_errors.Add(string.Format(T("materialShaderMissing"), material.name));
+                        continue;
+                    }
+                    string shaderPath = AssetDatabase.GetAssetPath(shader);
+                    bool customUrp = shader.name.StartsWith("Shader Graphs/", StringComparison.Ordinal) ||
+                        shader.name.StartsWith("Universal Render Pipeline/", StringComparison.Ordinal) ||
+                        (!IsBuiltInConvertibleShaderName(shader.name) &&
+                         (shaderPath.EndsWith(".shader", StringComparison.OrdinalIgnoreCase) || shaderPath.EndsWith(".shadergraph", StringComparison.OrdinalIgnoreCase)));
+                    if (customUrp && (!shader.isSupported || shader.passCount == 0)) m_errors.Add(string.Format(T("materialShaderUnsupported"), material.name, shader.name));
+                }
+            }
+        }
+
+        private static string[] GetBundleAssetNames(IEnumerable<ExportItem> items)
+        {
+            var assetNames = new HashSet<string>(items.Select(item => item.assetPath), StringComparer.OrdinalIgnoreCase);
+            foreach (var renderer in items.Select(item => item.source).Where(root => root != null).SelectMany(root => root.GetComponentsInChildren<Renderer>(true)))
+            {
+                foreach (var material in renderer.sharedMaterials)
+                {
+                    if (material == null || material.shader == null) continue;
+                    string path = AssetDatabase.GetAssetPath(material.shader);
+                    if (string.IsNullOrWhiteSpace(path) ||
+                        (!path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) && !path.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))) continue;
+                    if (path.EndsWith(".shader", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".shadergraph", StringComparison.OrdinalIgnoreCase)) assetNames.Add(path);
+                }
+            }
+            return assetNames.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+
+        private void ValidateBuiltBundle(string bundlePath, IEnumerable<ExportItem> items)
+        {
+            var bundle = AssetBundle.LoadFromFile(bundlePath);
+            if (bundle == null) throw new InvalidDataException(T("bundleBuildFailed"));
+            try
+            {
+                foreach (var item in items)
+                {
+                    var bundledRoot = bundle.LoadAsset<GameObject>(item.assetPath);
+                    if (bundledRoot == null) throw new InvalidDataException(string.Format(T("bundleBuildFailed"), item.name));
+                    var sourceRenderers = item.source.GetComponentsInChildren<Renderer>(true);
+                    var bundledRenderers = bundledRoot.GetComponentsInChildren<Renderer>(true);
+                    foreach (var bundledRenderer in bundledRenderers)
+                    {
+                        var sourceRenderer = sourceRenderers.FirstOrDefault(source => source.GetType() == bundledRenderer.GetType() && GetRelativePath(item.source.transform, source.transform) == GetRelativePath(bundledRoot.transform, bundledRenderer.transform));
+                        var bundledMaterials = bundledRenderer.sharedMaterials;
+                        var sourceMaterials = sourceRenderer != null ? sourceRenderer.sharedMaterials : Array.Empty<Material>();
+                        for (int slot = 0; slot < bundledMaterials.Length; slot++)
+                        {
+                            var bundledMaterial = bundledMaterials[slot];
+                            if (bundledMaterial == null) continue;
+                            if (bundledMaterial.shader == null || ((!bundledMaterial.shader.isSupported || bundledMaterial.shader.passCount == 0) && !IsBuiltInConvertibleShaderName(bundledMaterial.shader.name))) throw new InvalidDataException(string.Format(T("bundleMaterialInvalid"), bundledMaterial.name, bundledMaterial.shader != null ? bundledMaterial.shader.name : "missing"));
+                            var sourceMaterial = slot < sourceMaterials.Length ? sourceMaterials[slot] : null;
+                            if (sourceMaterial == null || sourceMaterial.shader == null || IsBuiltInConvertibleShaderName(sourceMaterial.shader.name)) continue;
+                            for (int i = 0; i < sourceMaterial.shader.GetPropertyCount(); i++)
+                            {
+                                if (sourceMaterial.shader.GetPropertyType(i) != ShaderPropertyType.Texture) continue;
+                                string property = sourceMaterial.shader.GetPropertyName(i);
+                                var sourceTexture = sourceMaterial.GetTexture(property);
+                                if (sourceTexture != null && (!bundledMaterial.HasProperty(property) || bundledMaterial.GetTexture(property) == null)) throw new InvalidDataException(string.Format(T("bundleTextureInvalid"), bundledMaterial.name, property));
+                            }
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                bundle.Unload(true);
+            }
+        }
+
+        private static bool IsBuiltInConvertibleShaderName(string name)
+        {
+            return name == "Standard" || name == "Standard (Specular setup)" || name.StartsWith("Legacy Shaders/", StringComparison.OrdinalIgnoreCase) ||
+                name.StartsWith("Mobile/", StringComparison.OrdinalIgnoreCase) || name.StartsWith("Unlit/", StringComparison.OrdinalIgnoreCase) ||
+                name.StartsWith("Nature/", StringComparison.OrdinalIgnoreCase) || name.StartsWith("Hidden/Terrain", StringComparison.OrdinalIgnoreCase) ||
+                name.StartsWith("glTF/Pbr", StringComparison.Ordinal);
+        }
+
+        private static bool IsEditorCompatibleBundleTarget(BuildTarget target)
+        {
+            return Application.platform == RuntimePlatform.LinuxEditor && target == BuildTarget.StandaloneLinux64 ||
+                Application.platform == RuntimePlatform.WindowsEditor && target == BuildTarget.StandaloneWindows64 ||
+                Application.platform == RuntimePlatform.OSXEditor && target == BuildTarget.StandaloneOSX;
         }
 
         private static List<GameObject> GetSceneObjects()
