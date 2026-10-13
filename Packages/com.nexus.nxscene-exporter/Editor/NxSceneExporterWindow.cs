@@ -95,7 +95,9 @@ namespace Nexus.NxScene.Editor
             { "materialShaderMissing", "Material {0} has no shader" },
             { "materialShaderUnsupported", "Material {0} uses an unsupported shader: {1}" },
             { "bundleMaterialInvalid", "Bundle material {0} cannot load shader {1}" },
-            { "bundleTextureInvalid", "Bundle material {0} lost texture property {1}" }
+            { "bundleTextureInvalid", "Bundle material {0} lost texture property {1}" },
+            { "bundleRendererMissing", "Exported renderer {0} has no matching source renderer" },
+            { "bundleMaterialAssignmentChanged", "Exported renderer {0} changed material position {1}" }
         };
 
         private static readonly Dictionary<string, string> Portuguese = new Dictionary<string, string>
@@ -156,7 +158,9 @@ namespace Nexus.NxScene.Editor
             { "materialShaderMissing", "O material {0} não possui shader" },
             { "materialShaderUnsupported", "O material {0} usa um shader incompatível: {1}" },
             { "bundleMaterialInvalid", "O material {0} não carregou o shader {1} no bundle" },
-            { "bundleTextureInvalid", "O material {0} perdeu a textura {1} no bundle" }
+            { "bundleTextureInvalid", "O material {0} perdeu a textura {1} no bundle" },
+            { "bundleRendererMissing", "O renderizador exportado {0} não corresponde a um renderizador de origem" },
+            { "bundleMaterialAssignmentChanged", "O renderizador exportado {0} alterou a posição do material {1}" }
         };
 
         private SourceKind m_source;
@@ -527,11 +531,15 @@ namespace Nexus.NxScene.Editor
                     if (bundledRoot == null) throw new InvalidDataException(string.Format(T("bundleBuildFailed"), item.name));
                     var sourceRenderers = item.source.GetComponentsInChildren<Renderer>(true);
                     var bundledRenderers = bundledRoot.GetComponentsInChildren<Renderer>(true);
+                    var matchedSourceRenderers = new HashSet<Renderer>();
                     foreach (var bundledRenderer in bundledRenderers)
                     {
-                        var sourceRenderer = sourceRenderers.FirstOrDefault(source => source.GetType() == bundledRenderer.GetType() && GetRelativePath(item.source.transform, source.transform) == GetRelativePath(bundledRoot.transform, bundledRenderer.transform));
+                        var sourceRenderer = sourceRenderers.FirstOrDefault(source => !matchedSourceRenderers.Contains(source) && source.GetType() == bundledRenderer.GetType() && GetRelativePath(item.source.transform, source.transform) == GetRelativePath(bundledRoot.transform, bundledRenderer.transform));
+                        if (sourceRenderer == null) throw new InvalidDataException(string.Format(T("bundleRendererMissing"), bundledRenderer.name));
+                        matchedSourceRenderers.Add(sourceRenderer);
                         var bundledMaterials = bundledRenderer.sharedMaterials;
-                        var sourceMaterials = sourceRenderer != null ? sourceRenderer.sharedMaterials : Array.Empty<Material>();
+                        var sourceMaterials = sourceRenderer.sharedMaterials;
+                        ValidateMaterialAssignments(bundledRenderer.name, sourceMaterials, bundledMaterials);
                         for (int slot = 0; slot < bundledMaterials.Length; slot++)
                         {
                             var bundledMaterial = bundledMaterials[slot];
@@ -553,6 +561,17 @@ namespace Nexus.NxScene.Editor
             finally
             {
                 bundle.Unload(true);
+            }
+        }
+
+        private void ValidateMaterialAssignments(string rendererName, Material[] sourceMaterials, Material[] bundledMaterials)
+        {
+            int materialCount = Math.Max(sourceMaterials.Length, bundledMaterials.Length);
+            for (int index = 0; index < materialCount; index++)
+            {
+                var sourceMaterial = index < sourceMaterials.Length ? sourceMaterials[index] : null;
+                var bundledMaterial = index < bundledMaterials.Length ? bundledMaterials[index] : null;
+                if ((sourceMaterial == null) != (bundledMaterial == null)) throw new InvalidDataException(string.Format(T("bundleMaterialAssignmentChanged"), rendererName, index + 1));
             }
         }
 
