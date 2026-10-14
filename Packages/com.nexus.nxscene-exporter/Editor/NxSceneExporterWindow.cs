@@ -481,24 +481,24 @@ namespace Nexus.NxScene.Editor
 
         private void ValidateMaterialShaders(IEnumerable<GameObject> roots)
         {
-            foreach (var renderer in roots.Where(root => root != null).SelectMany(root => root.GetComponentsInChildren<Renderer>(true)))
+            var materials = roots.Where(root => root != null)
+                .SelectMany(root => root.GetComponentsInChildren<Renderer>(true).SelectMany(renderer => renderer.sharedMaterials ?? Array.Empty<Material>()))
+                .Concat(roots.Where(root => root != null).SelectMany(GetDecalProjectors).Select(GetDecalMaterial));
+            foreach (var material in materials)
             {
-                foreach (var material in renderer.sharedMaterials)
+                if (material == null) continue;
+                var shader = material.shader;
+                if (shader == null)
                 {
-                    if (material == null) continue;
-                    var shader = material.shader;
-                    if (shader == null)
-                    {
-                        m_errors.Add(string.Format(T("materialShaderMissing"), material.name));
-                        continue;
-                    }
-                    string shaderPath = AssetDatabase.GetAssetPath(shader);
-                    bool customUrp = shader.name.StartsWith("Shader Graphs/", StringComparison.Ordinal) ||
-                        shader.name.StartsWith("Universal Render Pipeline/", StringComparison.Ordinal) ||
-                        (!IsBuiltInConvertibleShaderName(shader.name) &&
-                         (shaderPath.EndsWith(".shader", StringComparison.OrdinalIgnoreCase) || shaderPath.EndsWith(".shadergraph", StringComparison.OrdinalIgnoreCase)));
-                    if (customUrp && (!shader.isSupported || shader.passCount == 0)) m_errors.Add(string.Format(T("materialShaderUnsupported"), material.name, shader.name));
+                    m_errors.Add(string.Format(T("materialShaderMissing"), material.name));
+                    continue;
                 }
+                string shaderPath = AssetDatabase.GetAssetPath(shader);
+                bool customUrp = shader.name.StartsWith("Shader Graphs/", StringComparison.Ordinal) ||
+                    shader.name.StartsWith("Universal Render Pipeline/", StringComparison.Ordinal) ||
+                    (!IsBuiltInConvertibleShaderName(shader.name) &&
+                     (shaderPath.EndsWith(".shader", StringComparison.OrdinalIgnoreCase) || shaderPath.EndsWith(".shadergraph", StringComparison.OrdinalIgnoreCase)));
+                if (customUrp && (!shader.isSupported || shader.passCount == 0)) m_errors.Add(string.Format(T("materialShaderUnsupported"), material.name, shader.name));
             }
         }
 
@@ -507,16 +507,87 @@ namespace Nexus.NxScene.Editor
             var assetNames = new HashSet<string>(items.Select(item => item.assetPath), StringComparer.OrdinalIgnoreCase);
             foreach (var renderer in items.Select(item => item.source).Where(root => root != null).SelectMany(root => root.GetComponentsInChildren<Renderer>(true)))
             {
-                foreach (var material in renderer.sharedMaterials)
-                {
-                    if (material == null || material.shader == null) continue;
-                    string path = AssetDatabase.GetAssetPath(material.shader);
-                    if (string.IsNullOrWhiteSpace(path) ||
-                        (!path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) && !path.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))) continue;
-                    if (path.EndsWith(".shader", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".shadergraph", StringComparison.OrdinalIgnoreCase)) assetNames.Add(path);
-                }
+                AddShaderAssetPaths(assetNames, renderer.sharedMaterials);
+            }
+            foreach (var projector in items.Select(item => item.source).Where(root => root != null).SelectMany(GetDecalProjectors))
+            {
+                AddDecalMaterialAssets(assetNames, GetDecalMaterial(projector));
             }
             return assetNames.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+
+        private static void AddShaderAssetPaths(HashSet<string> assetNames, IEnumerable<Material> materials)
+        {
+            foreach (var material in materials ?? Array.Empty<Material>())
+            {
+                if (material == null || material.shader == null) continue;
+                string path = AssetDatabase.GetAssetPath(material.shader);
+                if (string.IsNullOrWhiteSpace(path) ||
+                    (!path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) && !path.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))) continue;
+                if (path.EndsWith(".shader", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".shadergraph", StringComparison.OrdinalIgnoreCase)) assetNames.Add(path);
+            }
+        }
+
+        private static void AddDecalMaterialAssets(HashSet<string> assetNames, Material material)
+        {
+            if (material == null || material.shader == null) return;
+            AddPackageAssetPath(assetNames, AssetDatabase.GetAssetPath(material));
+            AddPackageAssetPath(assetNames, AssetDatabase.GetAssetPath(material.shader));
+            for (int i = 0; i < material.shader.GetPropertyCount(); i++)
+            {
+                if (material.shader.GetPropertyType(i) != ShaderPropertyType.Texture) continue;
+                var texture = material.GetTexture(material.shader.GetPropertyName(i));
+                if (texture != null) AddPackageAssetPath(assetNames, AssetDatabase.GetAssetPath(texture));
+            }
+        }
+
+        private static void AddPackageAssetPath(HashSet<string> assetNames, string path)
+        {
+            if (!string.IsNullOrWhiteSpace(path) &&
+                (path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) || path.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase)))
+                assetNames.Add(path);
+        }
+
+        private static IEnumerable<Component> GetDecalProjectors(GameObject root)
+        {
+            return root.GetComponentsInChildren<Component>(true).Where(component => component != null && component.GetType().FullName == "UnityEngine.Rendering.Universal.DecalProjector");
+        }
+
+        private static Material GetDecalMaterial(Component projector)
+        {
+            var property = projector?.GetType().GetProperty("material", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+            return property?.GetValue(projector, null) as Material;
+        }
+
+        private void ValidateDecalMaterials(ExportItem item, GameObject bundledRoot)
+        {
+            var sourceProjectors = GetDecalProjectors(item.source).ToArray();
+            var bundledProjectors = GetDecalProjectors(bundledRoot).ToArray();
+            if (sourceProjectors.Length != bundledProjectors.Length) throw new InvalidDataException(string.Format(T("bundleRendererMissing"), item.name));
+            var matched = new HashSet<Component>();
+            foreach (var bundledProjector in bundledProjectors)
+            {
+                string bundledPath = GetRelativePath(bundledRoot.transform, bundledProjector.transform);
+                var sourceProjector = sourceProjectors.FirstOrDefault(source => !matched.Contains(source) && GetRelativePath(item.source.transform, source.transform) == bundledPath);
+                if (sourceProjector == null) throw new InvalidDataException(string.Format(T("bundleRendererMissing"), bundledProjector.name));
+                matched.Add(sourceProjector);
+                ValidateDecalMaterialPair(bundledProjector.name, GetDecalMaterial(sourceProjector), GetDecalMaterial(bundledProjector));
+            }
+        }
+
+        private void ValidateDecalMaterialPair(string owner, Material source, Material bundled)
+        {
+            if (source == null || bundled == null) throw new InvalidDataException(string.Format(T("bundleMaterialInvalid"), owner, "missing decal material"));
+            if (source.shader == null || bundled.shader == null || source.shader.name != bundled.shader.name)
+                throw new InvalidDataException(string.Format(T("bundleMaterialInvalid"), bundled.name, bundled.shader != null ? bundled.shader.name : "missing decal shader"));
+            for (int i = 0; i < source.shader.GetPropertyCount(); i++)
+            {
+                if (source.shader.GetPropertyType(i) != ShaderPropertyType.Texture) continue;
+                string property = source.shader.GetPropertyName(i);
+                var sourceTexture = source.GetTexture(property);
+                if (sourceTexture != null && (!bundled.HasProperty(property) || bundled.GetTexture(property) == null))
+                    throw new InvalidDataException(string.Format(T("bundleTextureInvalid"), bundled.name, property));
+            }
         }
 
         private void ValidateBuiltBundle(string bundlePath, IEnumerable<ExportItem> items)
@@ -556,6 +627,7 @@ namespace Nexus.NxScene.Editor
                             }
                         }
                     }
+                    ValidateDecalMaterials(item, bundledRoot);
                 }
             }
             finally
