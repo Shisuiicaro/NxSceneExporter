@@ -571,7 +571,9 @@ namespace Nexus.NxScene.Editor
 
         private void ValidateDecalMaterials(ExportItem item, GameObject bundledRoot)
         {
-            var sourceProjectors = GetDecalProjectors(item.source).ToArray();
+            var sourceProjectors = (m_source == SourceKind.CurrentScene
+                ? item.source.GetComponents<Component>().Where(component => component != null && component.GetType().FullName == "UnityEngine.Rendering.Universal.DecalProjector")
+                : GetDecalProjectors(item.source)).ToArray();
             var bundledProjectors = GetDecalProjectors(bundledRoot).ToArray();
             if (sourceProjectors.Length != bundledProjectors.Length) throw new InvalidDataException(string.Format(T("bundleRendererMissing"), item.name));
             var matched = new HashSet<Component>();
