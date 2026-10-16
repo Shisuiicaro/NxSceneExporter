@@ -97,6 +97,8 @@ namespace Nexus.NxScene.Editor
             { "bundleMaterialInvalid", "Bundle material {0} cannot load shader {1}" },
             { "bundleTextureInvalid", "Bundle material {0} lost texture property {1}" },
             { "bundleRendererMissing", "Exported renderer {0} has no matching source renderer" },
+            { "bundleTerrainDataMissing", "Exported terrain {0} is missing its terrain data" },
+            { "bundleTerrainDataChanged", "Exported terrain {0} has different terrain data" },
             { "bundleMaterialAssignmentChanged", "Exported renderer {0} changed material position {1}" }
         };
 
@@ -160,6 +162,8 @@ namespace Nexus.NxScene.Editor
             { "bundleMaterialInvalid", "O material {0} não carregou o shader {1} no bundle" },
             { "bundleTextureInvalid", "O material {0} perdeu a textura {1} no bundle" },
             { "bundleRendererMissing", "O renderizador exportado {0} não corresponde a um renderizador de origem" },
+            { "bundleTerrainDataMissing", "O terreno exportado {0} está sem os dados do terreno" },
+            { "bundleTerrainDataChanged", "O terreno exportado {0} possui dados diferentes" },
             { "bundleMaterialAssignmentChanged", "O renderizador exportado {0} alterou a posição do material {1}" }
         };
 
@@ -362,7 +366,7 @@ namespace Nexus.NxScene.Editor
                         string assetPath = sourcePath;
                         if (m_source == SourceKind.CurrentScene || string.IsNullOrEmpty(sourcePath) || RequiresScriptStrip(roots[i]))
                         {
-                            var clone = m_source == SourceKind.CurrentScene ? CreateSingleObjectClone(roots[i]) : Instantiate(roots[i]);
+                            var clone = m_source == SourceKind.CurrentScene ? CreateSingleObjectClone(roots[i], tempAssetRoot, createdAssets) : Instantiate(roots[i]);
                             clone.name = roots[i].name;
                             clone.transform.localPosition = Vector3.zero;
                             clone.transform.localRotation = Quaternion.identity;
@@ -408,7 +412,7 @@ namespace Nexus.NxScene.Editor
                         EditorUtility.DisplayProgressBar(T("exporting"), string.Format(T("building"), platformLabel), 0.5f);
                         string targetRoot = Path.Combine(bundlesRoot, target.Item1);
                         Directory.CreateDirectory(targetRoot);
-                        var bundleAssetNames = GetBundleAssetNames(assetItems);
+                        var bundleAssetNames = GetBundleAssetNames(assetItems, createdAssets);
                         var builds = new[] { new AssetBundleBuild { assetBundleName = bundleFileName, assetNames = bundleAssetNames } };
                         var bundleManifest = BuildPipeline.BuildAssetBundles(targetRoot, builds, BuildAssetBundleOptions.ChunkBasedCompression, target.Item2);
                         if (bundleManifest == null || builds.Any(build => !File.Exists(Path.Combine(targetRoot, build.assetBundleName)))) throw new InvalidOperationException(string.Format(T("bundleBuildFailed"), platformLabel));
@@ -502,9 +506,15 @@ namespace Nexus.NxScene.Editor
             }
         }
 
-        private static string[] GetBundleAssetNames(IEnumerable<ExportItem> items)
+        private static string[] GetBundleAssetNames(IEnumerable<ExportItem> items, IEnumerable<string> createdAssets)
         {
             var assetNames = new HashSet<string>(items.Select(item => item.assetPath), StringComparer.OrdinalIgnoreCase);
+            foreach (var path in createdAssets.Where(path => !path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))) assetNames.Add(path);
+            foreach (var terrainData in items.Select(item => item.source).Where(root => root != null)
+                .SelectMany(root => root.GetComponentsInChildren<Terrain>(true).Select(terrain => terrain.terrainData)
+                    .Concat(root.GetComponentsInChildren<TerrainCollider>(true).Select(collider => collider.terrainData)))
+                .Where(data => data != null))
+                AddPackageAssetPath(assetNames, AssetDatabase.GetAssetPath(terrainData));
             foreach (var renderer in items.Select(item => item.source).Where(root => root != null).SelectMany(root => root.GetComponentsInChildren<Renderer>(true)))
             {
                 AddShaderAssetPaths(assetNames, renderer.sharedMaterials);
@@ -627,6 +637,7 @@ namespace Nexus.NxScene.Editor
                             }
                         }
                     }
+                    ValidateTerrainData(item, bundledRoot);
                     ValidateDecalMaterials(item, bundledRoot);
                 }
             }
@@ -634,6 +645,40 @@ namespace Nexus.NxScene.Editor
             {
                 bundle.Unload(true);
             }
+        }
+
+        private void ValidateTerrainData(ExportItem item, GameObject bundledRoot)
+        {
+            foreach (var sourceTerrain in item.source.GetComponentsInChildren<Terrain>(true))
+            {
+                var path = GetRelativePath(item.source.transform, sourceTerrain.transform);
+                var bundledTerrain = bundledRoot.GetComponentsInChildren<Terrain>(true).FirstOrDefault(candidate => GetRelativePath(bundledRoot.transform, candidate.transform) == path);
+                if (sourceTerrain.terrainData == null) continue;
+                if (bundledTerrain == null || bundledTerrain.terrainData == null)
+                    throw new InvalidDataException(string.Format(T("bundleTerrainDataMissing"), sourceTerrain.name));
+                if (!TerrainDataMatches(sourceTerrain.terrainData, bundledTerrain.terrainData))
+                    throw new InvalidDataException(string.Format(T("bundleTerrainDataChanged"), sourceTerrain.name));
+            }
+
+            foreach (var sourceCollider in item.source.GetComponentsInChildren<TerrainCollider>(true))
+            {
+                var path = GetRelativePath(item.source.transform, sourceCollider.transform);
+                var bundledCollider = bundledRoot.GetComponentsInChildren<TerrainCollider>(true).FirstOrDefault(candidate => GetRelativePath(bundledRoot.transform, candidate.transform) == path);
+                if (sourceCollider.terrainData != null && (bundledCollider == null || bundledCollider.terrainData == null || !TerrainDataMatches(sourceCollider.terrainData, bundledCollider.terrainData)))
+                    throw new InvalidDataException(string.Format(T("bundleTerrainDataMissing"), sourceCollider.name));
+            }
+        }
+
+        private static bool TerrainDataMatches(TerrainData source, TerrainData bundled)
+        {
+            if (source == null || bundled == null || source.heightmapResolution != bundled.heightmapResolution || source.size != bundled.size ||
+                source.alphamapResolution != bundled.alphamapResolution || source.terrainLayers.Length != bundled.terrainLayers.Length ||
+                source.detailPrototypes.Length != bundled.detailPrototypes.Length || source.treePrototypes.Length != bundled.treePrototypes.Length) return false;
+            int last = source.heightmapResolution - 1;
+            var samples = new[] { Vector2Int.zero, new Vector2Int(0, last), new Vector2Int(last, 0), new Vector2Int(last, last), new Vector2Int(last / 2, last / 2) };
+            foreach (var sample in samples)
+                if (source.GetHeights(sample.x, sample.y, 1, 1)[0, 0] != bundled.GetHeights(sample.x, sample.y, 1, 1)[0, 0]) return false;
+            return true;
         }
 
         private void ValidateMaterialAssignments(string rendererName, Material[] sourceMaterials, Material[] bundledMaterials)
@@ -699,10 +744,10 @@ namespace Nexus.NxScene.Editor
             var components = root.GetComponentsInChildren<Component>(true);
             foreach (var component in components)
             {
-                if (component == null || component is Transform || component is MonoBehaviour || component is LODGroup) continue;
+                if (component == null || component is Transform || component is LODGroup) continue;
                 builder.Append("|C|").Append(GetRelativePath(root.transform, component.transform));
                 builder.Append('|').Append(component.GetType().AssemblyQualifiedName);
-                builder.Append('|').Append(EditorJsonUtility.ToJson(component));
+                if (!(component is MonoBehaviour)) builder.Append('|').Append(EditorJsonUtility.ToJson(component));
             }
 
             using var sha = SHA1.Create();
@@ -721,7 +766,7 @@ namespace Nexus.NxScene.Editor
             return string.Join("/", names);
         }
 
-        private static GameObject CreateSingleObjectClone(GameObject source)
+        private static GameObject CreateSingleObjectClone(GameObject source, string tempAssetRoot, List<string> createdAssets)
         {
             var clone = new GameObject(source.name)
             {
@@ -735,7 +780,33 @@ namespace Nexus.NxScene.Editor
                 ComponentUtility.CopyComponent(component);
                 ComponentUtility.PasteComponentAsNew(clone);
             }
+            var sourceTerrain = source.GetComponent<Terrain>();
+            var cloneTerrain = clone.GetComponent<Terrain>();
+            var terrainDataCopies = new Dictionary<int, TerrainData>();
+            if (sourceTerrain != null && cloneTerrain != null) cloneTerrain.terrainData = CreateBundleTerrainData(sourceTerrain.terrainData, tempAssetRoot, createdAssets, terrainDataCopies);
+            var sourceCollider = source.GetComponent<TerrainCollider>();
+            var cloneCollider = clone.GetComponent<TerrainCollider>();
+            if (sourceCollider != null && cloneCollider != null) cloneCollider.terrainData = CreateBundleTerrainData(sourceCollider.terrainData, tempAssetRoot, createdAssets, terrainDataCopies);
             return clone;
+        }
+
+        private static TerrainData CreateBundleTerrainData(TerrainData source, string tempAssetRoot, List<string> createdAssets, Dictionary<int, TerrainData> copies)
+        {
+            if (source == null) return null;
+            if (copies.TryGetValue(source.GetInstanceID(), out var cached)) return cached;
+            string sourcePath = AssetDatabase.GetAssetPath(source);
+            if (sourcePath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) || sourcePath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+            {
+                copies[source.GetInstanceID()] = source;
+                return source;
+            }
+            var copy = UnityEngine.Object.Instantiate(source);
+            copy.name = source.name;
+            string assetPath = AssetDatabase.GenerateUniqueAssetPath(tempAssetRoot + "/" + Sanitize(source.name) + ".asset");
+            AssetDatabase.CreateAsset(copy, assetPath);
+            createdAssets.Add(assetPath);
+            copies[source.GetInstanceID()] = copy;
+            return copy;
         }
 
         private static string GetHierarchyPath(Transform source)
