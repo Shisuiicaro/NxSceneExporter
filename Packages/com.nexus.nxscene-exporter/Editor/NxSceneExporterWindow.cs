@@ -346,6 +346,7 @@ namespace Nexus.NxScene.Editor
             var items = new List<ExportItem>();
             var assetItems = new List<ExportItem>();
             var assetBySignature = new Dictionary<string, ExportItem>(StringComparer.Ordinal);
+            var generatedMeshAssets = new Dictionary<int, Mesh>();
             bool assetEditing = false;
             try
             {
@@ -366,7 +367,7 @@ namespace Nexus.NxScene.Editor
                         string assetPath = sourcePath;
                         if (m_source == SourceKind.CurrentScene || string.IsNullOrEmpty(sourcePath) || RequiresScriptStrip(roots[i]))
                         {
-                            var clone = m_source == SourceKind.CurrentScene ? CreateSingleObjectClone(roots[i], tempAssetRoot, createdAssets) : Instantiate(roots[i]);
+                            var clone = m_source == SourceKind.CurrentScene ? CreateSingleObjectClone(roots[i], tempAssetRoot, createdAssets, generatedMeshAssets) : Instantiate(roots[i]);
                             clone.name = roots[i].name;
                             clone.transform.localPosition = Vector3.zero;
                             clone.transform.localRotation = Quaternion.identity;
@@ -639,6 +640,7 @@ namespace Nexus.NxScene.Editor
                             }
                         }
                     }
+                    ValidateMeshAssignments(item, bundledRoot);
                     ValidateTerrainData(item, bundledRoot);
                     ValidateDecalMaterials(item, bundledRoot);
                 }
@@ -647,6 +649,50 @@ namespace Nexus.NxScene.Editor
             {
                 bundle.Unload(true);
             }
+        }
+
+        private void ValidateMeshAssignments(ExportItem item, GameObject bundledRoot)
+        {
+            var bundledTransforms = bundledRoot.GetComponentsInChildren<Transform>(true).ToDictionary(transform => GetMeshOwnerPath(bundledRoot.transform, transform), StringComparer.Ordinal);
+            var sourceTransforms = m_source == SourceKind.CurrentScene ? new[] { item.source.transform } : item.source.GetComponentsInChildren<Transform>(true);
+            foreach (var sourceTransform in sourceTransforms)
+            {
+                string path = GetMeshOwnerPath(item.source.transform, sourceTransform);
+                if (!bundledTransforms.TryGetValue(path, out var bundledTransform)) throw new InvalidDataException($"Export bundle is missing mesh owner '{path}' in '{item.name}'");
+                var sourceFilters = sourceTransform.GetComponents<MeshFilter>();
+                var bundledFilters = bundledTransform.GetComponents<MeshFilter>();
+                if (sourceFilters.Length != bundledFilters.Length) throw new InvalidDataException($"Export bundle has a different MeshFilter count at '{path}' in '{item.name}'");
+                for (int i = 0; i < sourceFilters.Length; i++) ValidateBundledMesh(sourceFilters[i].sharedMesh, bundledFilters[i].sharedMesh, item.name, path, "MeshFilter", i);
+                var sourceSkinned = sourceTransform.GetComponents<SkinnedMeshRenderer>();
+                var bundledSkinned = bundledTransform.GetComponents<SkinnedMeshRenderer>();
+                if (sourceSkinned.Length != bundledSkinned.Length) throw new InvalidDataException($"Export bundle has a different SkinnedMeshRenderer count at '{path}' in '{item.name}'");
+                for (int i = 0; i < sourceSkinned.Length; i++) ValidateBundledMesh(sourceSkinned[i].sharedMesh, bundledSkinned[i].sharedMesh, item.name, path, "SkinnedMeshRenderer", i);
+                var sourceColliders = sourceTransform.GetComponents<MeshCollider>();
+                var bundledColliders = bundledTransform.GetComponents<MeshCollider>();
+                if (sourceColliders.Length != bundledColliders.Length) throw new InvalidDataException($"Export bundle has a different MeshCollider count at '{path}' in '{item.name}'");
+                for (int i = 0; i < sourceColliders.Length; i++) ValidateBundledMesh(sourceColliders[i].sharedMesh, bundledColliders[i].sharedMesh, item.name, path, "MeshCollider", i);
+            }
+        }
+
+        private static string GetMeshOwnerPath(Transform root, Transform current)
+        {
+            var parts = new Stack<string>();
+            for (var cursor = current; cursor != null && cursor != root; cursor = cursor.parent) parts.Push(cursor.name + "[" + cursor.GetSiblingIndex() + "]");
+            return string.Join("/", parts);
+        }
+
+        private static void ValidateBundledMesh(Mesh source, Mesh bundled, string prefabName, string path, string component, int index)
+        {
+            if (source == null && bundled == null) return;
+            if (source == null || bundled == null) throw new InvalidDataException($"Export bundle mesh is missing: {prefabName}/{path}/{component}/{index}");
+            if (source.vertexCount != bundled.vertexCount || source.subMeshCount != bundled.subMeshCount || source.indexFormat != bundled.indexFormat || source.bounds != bundled.bounds)
+                throw new InvalidDataException($"Export bundle mesh differs from source: {prefabName}/{path}/{component}/{index}");
+            if (!source.isReadable || !bundled.isReadable) return;
+            if (!source.vertices.SequenceEqual(bundled.vertices) || !source.normals.SequenceEqual(bundled.normals) || !source.tangents.SequenceEqual(bundled.tangents) || !source.uv.SequenceEqual(bundled.uv) || !source.uv2.SequenceEqual(bundled.uv2) || !source.uv3.SequenceEqual(bundled.uv3) || !source.uv4.SequenceEqual(bundled.uv4) || !source.colors.SequenceEqual(bundled.colors) || !source.boneWeights.SequenceEqual(bundled.boneWeights) || !source.bindposes.SequenceEqual(bundled.bindposes))
+                throw new InvalidDataException($"Export bundle mesh data differs from source: {prefabName}/{path}/{component}/{index}");
+            for (int subMesh = 0; subMesh < source.subMeshCount; subMesh++)
+                if (source.GetTopology(subMesh) != bundled.GetTopology(subMesh) || !source.GetIndices(subMesh).SequenceEqual(bundled.GetIndices(subMesh)))
+                    throw new InvalidDataException($"Export bundle mesh indices differ from source: {prefabName}/{path}/{component}/{index}");
         }
 
         private void ValidateTerrainData(ExportItem item, GameObject bundledRoot)
@@ -768,7 +814,7 @@ namespace Nexus.NxScene.Editor
             return string.Join("/", names);
         }
 
-        private static GameObject CreateSingleObjectClone(GameObject source, string tempAssetRoot, List<string> createdAssets)
+        private static GameObject CreateSingleObjectClone(GameObject source, string tempAssetRoot, List<string> createdAssets, Dictionary<int, Mesh> generatedMeshAssets)
         {
             var clone = new GameObject(source.name)
             {
@@ -782,6 +828,18 @@ namespace Nexus.NxScene.Editor
                 ComponentUtility.CopyComponent(component);
                 ComponentUtility.PasteComponentAsNew(clone);
             }
+            var sourceFilters = source.GetComponents<MeshFilter>();
+            var cloneFilters = clone.GetComponents<MeshFilter>();
+            for (int i = 0; i < sourceFilters.Length && i < cloneFilters.Length; i++)
+                cloneFilters[i].sharedMesh = EnsureBundleMesh(sourceFilters[i].sharedMesh, tempAssetRoot, createdAssets, generatedMeshAssets);
+            var sourceSkinned = source.GetComponents<SkinnedMeshRenderer>();
+            var cloneSkinned = clone.GetComponents<SkinnedMeshRenderer>();
+            for (int i = 0; i < sourceSkinned.Length && i < cloneSkinned.Length; i++)
+                cloneSkinned[i].sharedMesh = EnsureBundleMesh(sourceSkinned[i].sharedMesh, tempAssetRoot, createdAssets, generatedMeshAssets);
+            var sourceMeshColliders = source.GetComponents<MeshCollider>();
+            var cloneMeshColliders = clone.GetComponents<MeshCollider>();
+            for (int i = 0; i < sourceMeshColliders.Length && i < cloneMeshColliders.Length; i++)
+                cloneMeshColliders[i].sharedMesh = EnsureBundleMesh(sourceMeshColliders[i].sharedMesh, tempAssetRoot, createdAssets, generatedMeshAssets);
             var sourceTerrain = source.GetComponent<Terrain>();
             var cloneTerrain = clone.GetComponent<Terrain>();
             var terrainDataCopies = new Dictionary<int, TerrainData>();
@@ -790,6 +848,22 @@ namespace Nexus.NxScene.Editor
             var cloneCollider = clone.GetComponent<TerrainCollider>();
             if (sourceCollider != null && cloneCollider != null) cloneCollider.terrainData = CreateBundleTerrainData(sourceCollider.terrainData, tempAssetRoot, createdAssets, terrainDataCopies);
             return clone;
+        }
+
+        private static Mesh EnsureBundleMesh(Mesh source, string tempAssetRoot, List<string> createdAssets, Dictionary<int, Mesh> generatedMeshAssets)
+        {
+            if (source == null) return null;
+            string sourcePath = AssetDatabase.GetAssetPath(source);
+            if (AssetDatabase.Contains(source) && !string.IsNullOrWhiteSpace(sourcePath)) return source;
+            if (generatedMeshAssets.TryGetValue(source.GetInstanceID(), out var cached)) return cached;
+            var copy = UnityEngine.Object.Instantiate(source);
+            copy.name = source.name;
+            string assetPath = AssetDatabase.GenerateUniqueAssetPath(tempAssetRoot + "/" + Sanitize(source.name) + ".asset");
+            AssetDatabase.CreateAsset(copy, assetPath);
+            if (AssetDatabase.LoadAssetAtPath<Mesh>(assetPath) == null) throw new InvalidDataException($"Could not create an export asset for generated mesh '{source.name}'");
+            createdAssets.Add(assetPath);
+            generatedMeshAssets.Add(source.GetInstanceID(), copy);
+            return copy;
         }
 
         private static TerrainData CreateBundleTerrainData(TerrainData source, string tempAssetRoot, List<string> createdAssets, Dictionary<int, TerrainData> copies)
