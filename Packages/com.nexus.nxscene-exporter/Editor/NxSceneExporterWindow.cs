@@ -99,6 +99,7 @@ namespace Nexus.NxScene.Editor
             { "bundleTextureInvalid", "Bundle material {0} lost texture property {1}" },
             { "bundleRendererMissing", "Exported renderer {0} has no matching source renderer" },
             { "bundleTerrainDataMissing", "Exported terrain {0} is missing its terrain data" },
+            { "bundleTerrainMissing", "Exported terrain {0} was not found" },
             { "bundleTerrainDataChanged", "Exported terrain {0} has different terrain data" },
             { "bundleMaterialAssignmentChanged", "Exported renderer {0} lost material {1}: {2}" }
         };
@@ -164,6 +165,7 @@ namespace Nexus.NxScene.Editor
             { "bundleTextureInvalid", "O material {0} perdeu a textura {1} no bundle" },
             { "bundleRendererMissing", "O renderizador exportado {0} não corresponde a um renderizador de origem" },
             { "bundleTerrainDataMissing", "O terreno exportado {0} está sem os dados do terreno" },
+            { "bundleTerrainMissing", "O terreno exportado {0} não foi encontrado" },
             { "bundleTerrainDataChanged", "O terreno exportado {0} possui dados diferentes" },
             { "bundleMaterialAssignmentChanged", "O renderizador exportado {0} perdeu o material {1}: {2}" }
         };
@@ -718,23 +720,28 @@ namespace Nexus.NxScene.Editor
 
         private void ValidateTerrainData(ExportItem item, GameObject bundledRoot)
         {
-            foreach (var sourceTerrain in item.source.GetComponentsInChildren<Terrain>(true))
+            var sourceTerrains = m_source == SourceKind.CurrentScene ? item.source.GetComponents<Terrain>() : item.source.GetComponentsInChildren<Terrain>(true);
+            foreach (var sourceTerrain in sourceTerrains)
             {
                 var path = GetRelativePath(item.source.transform, sourceTerrain.transform);
                 var bundledTerrain = bundledRoot.GetComponentsInChildren<Terrain>(true).FirstOrDefault(candidate => GetRelativePath(bundledRoot.transform, candidate.transform) == path);
                 if (sourceTerrain.terrainData == null) continue;
-                if (bundledTerrain == null || bundledTerrain.terrainData == null)
-                    throw new InvalidDataException(string.Format(T("bundleTerrainDataMissing"), sourceTerrain.name));
+                if (bundledTerrain == null) throw new InvalidDataException(string.Format(T("bundleTerrainMissing"), sourceTerrain.name));
+                if (bundledTerrain.terrainData == null) throw new InvalidDataException(string.Format(T("bundleTerrainDataMissing"), sourceTerrain.name));
                 if (!TerrainDataMatches(sourceTerrain.terrainData, bundledTerrain.terrainData))
                     throw new InvalidDataException(string.Format(T("bundleTerrainDataChanged"), sourceTerrain.name));
             }
 
-            foreach (var sourceCollider in item.source.GetComponentsInChildren<TerrainCollider>(true))
+            var sourceColliders = m_source == SourceKind.CurrentScene ? item.source.GetComponents<TerrainCollider>() : item.source.GetComponentsInChildren<TerrainCollider>(true);
+            foreach (var sourceCollider in sourceColliders)
             {
                 var path = GetRelativePath(item.source.transform, sourceCollider.transform);
                 var bundledCollider = bundledRoot.GetComponentsInChildren<TerrainCollider>(true).FirstOrDefault(candidate => GetRelativePath(bundledRoot.transform, candidate.transform) == path);
-                if (sourceCollider.terrainData != null && (bundledCollider == null || bundledCollider.terrainData == null || !TerrainDataMatches(sourceCollider.terrainData, bundledCollider.terrainData)))
-                    throw new InvalidDataException(string.Format(T("bundleTerrainDataMissing"), sourceCollider.name));
+                if (sourceCollider.terrainData == null) continue;
+                if (bundledCollider == null) throw new InvalidDataException(string.Format(T("bundleTerrainMissing"), sourceCollider.name));
+                if (bundledCollider.terrainData == null) throw new InvalidDataException(string.Format(T("bundleTerrainDataMissing"), sourceCollider.name));
+                if (!TerrainDataMatches(sourceCollider.terrainData, bundledCollider.terrainData))
+                    throw new InvalidDataException(string.Format(T("bundleTerrainDataChanged"), sourceCollider.name));
             }
         }
 
