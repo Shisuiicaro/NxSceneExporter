@@ -35,6 +35,7 @@ namespace Nexus.NxScene.Editor
         {
             public string path;
             public bool wasReadable;
+            public ModelImporterMeshCompression meshCompression;
         }
 
         private static readonly Dictionary<string, string> English = new Dictionary<string, string>
@@ -64,7 +65,7 @@ namespace Nexus.NxScene.Editor
             { "ready", "Ready to export" },
             { "errors", "Export blocked" },
             { "warnings", "Warnings" },
-            { "scriptsRemoved", "Scripts will be removed from the export" },
+            { "scriptsRemoved", "Scripts will be removed from {0} objects" },
             { "noErrors", "No blocking issues found" },
             { "selectOutput", "Choose an output folder" },
             { "sceneUnsaved", "Save the current scene first" },
@@ -99,7 +100,7 @@ namespace Nexus.NxScene.Editor
             { "bundleRendererMissing", "Exported renderer {0} has no matching source renderer" },
             { "bundleTerrainDataMissing", "Exported terrain {0} is missing its terrain data" },
             { "bundleTerrainDataChanged", "Exported terrain {0} has different terrain data" },
-            { "bundleMaterialAssignmentChanged", "Exported renderer {0} changed material position {1}" }
+            { "bundleMaterialAssignmentChanged", "Exported renderer {0} lost material {1}: {2}" }
         };
 
         private static readonly Dictionary<string, string> Portuguese = new Dictionary<string, string>
@@ -129,7 +130,7 @@ namespace Nexus.NxScene.Editor
             { "ready", "Pronto para exportar" },
             { "errors", "Exportação bloqueada" },
             { "warnings", "Avisos" },
-            { "scriptsRemoved", "Os scripts serão removidos da exportação" },
+            { "scriptsRemoved", "Os scripts serão removidos de {0} objetos" },
             { "noErrors", "Nenhum problema bloqueante" },
             { "selectOutput", "Escolha uma pasta de saída" },
             { "sceneUnsaved", "Salve a cena atual primeiro" },
@@ -164,7 +165,7 @@ namespace Nexus.NxScene.Editor
             { "bundleRendererMissing", "O renderizador exportado {0} não corresponde a um renderizador de origem" },
             { "bundleTerrainDataMissing", "O terreno exportado {0} está sem os dados do terreno" },
             { "bundleTerrainDataChanged", "O terreno exportado {0} possui dados diferentes" },
-            { "bundleMaterialAssignmentChanged", "O renderizador exportado {0} alterou a posição do material {1}" }
+            { "bundleMaterialAssignmentChanged", "O renderizador exportado {0} perdeu o material {1}: {2}" }
         };
 
         private SourceKind m_source;
@@ -327,7 +328,8 @@ namespace Nexus.NxScene.Editor
             ValidateMaterialShaders(roots);
             try { BuildLodGroups(roots.Select(root => new ExportItem { source = root }).ToList()); }
             catch { m_errors.Add(T("lodRefsInvalid")); }
-            if (roots.Any(RequiresScriptStrip)) m_warnings.Add(T("scriptsRemoved"));
+            int scriptRootCount = roots.Count(RequiresScriptStrip);
+            if (scriptRootCount > 0) m_warnings.Add(string.Format(T("scriptsRemoved"), scriptRootCount));
             Repaint();
         }
 
@@ -367,12 +369,13 @@ namespace Nexus.NxScene.Editor
                         string assetPath = sourcePath;
                         if (m_source == SourceKind.CurrentScene || string.IsNullOrEmpty(sourcePath) || RequiresScriptStrip(roots[i]))
                         {
-                            var clone = m_source == SourceKind.CurrentScene ? CreateSingleObjectClone(roots[i], tempAssetRoot, createdAssets, generatedMeshAssets) : Instantiate(roots[i]);
+                            var clone = m_source == SourceKind.CurrentScene ? CreateSingleObjectClone(roots[i]) : Instantiate(roots[i]);
                             clone.name = roots[i].name;
                             clone.transform.localPosition = Vector3.zero;
                             clone.transform.localRotation = Quaternion.identity;
                             clone.transform.localScale = Vector3.one;
                             if (m_source != SourceKind.CurrentScene) StripScripts(clone);
+                            PrepareBundleClone(clone, tempAssetRoot, createdAssets, generatedMeshAssets);
                             assetPath = AssetDatabase.GenerateUniqueAssetPath(tempAssetRoot + "/" + Sanitize(roots[i].name) + ".prefab");
                             PrefabUtility.SaveAsPrefabAsset(clone, assetPath);
                             DestroyImmediate(clone);
@@ -518,7 +521,7 @@ namespace Nexus.NxScene.Editor
                 .SelectMany(root => root.GetComponentsInChildren<Terrain>(true).Select(terrain => terrain.terrainData)
                     .Concat(root.GetComponentsInChildren<TerrainCollider>(true).Select(collider => collider.terrainData)))
                 .Where(data => data != null))
-                AddPackageAssetPath(assetNames, AssetDatabase.GetAssetPath(terrainData));
+                AddTerrainDataAssetPath(assetNames, terrainData);
             foreach (var renderer in items.Select(item => item.source).Where(root => root != null).SelectMany(root => root.GetComponentsInChildren<Renderer>(true)))
             {
                 AddShaderAssetPaths(assetNames, renderer.sharedMaterials);
@@ -560,6 +563,12 @@ namespace Nexus.NxScene.Editor
             if (!string.IsNullOrWhiteSpace(path) &&
                 (path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) || path.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase)))
                 assetNames.Add(path);
+        }
+
+        private static void AddTerrainDataAssetPath(HashSet<string> assetNames, TerrainData terrainData)
+        {
+            string path = AssetDatabase.GetAssetPath(terrainData);
+            if (IsStandaloneAsset(terrainData, path)) AddPackageAssetPath(assetNames, path);
         }
 
         private static IEnumerable<Component> GetDecalProjectors(GameObject root)
@@ -748,7 +757,7 @@ namespace Nexus.NxScene.Editor
             {
                 var sourceMaterial = index < sourceMaterials.Length ? sourceMaterials[index] : null;
                 var bundledMaterial = index < bundledMaterials.Length ? bundledMaterials[index] : null;
-                if ((sourceMaterial == null) != (bundledMaterial == null)) throw new InvalidDataException(string.Format(T("bundleMaterialAssignmentChanged"), rendererName, index + 1));
+                if (sourceMaterial != null && bundledMaterial == null) throw new InvalidDataException(string.Format(T("bundleMaterialAssignmentChanged"), rendererName, index + 1, sourceMaterial.name));
             }
         }
 
@@ -826,7 +835,7 @@ namespace Nexus.NxScene.Editor
             return string.Join("/", names);
         }
 
-        private static GameObject CreateSingleObjectClone(GameObject source, string tempAssetRoot, List<string> createdAssets, Dictionary<int, Mesh> generatedMeshAssets)
+        private static GameObject CreateSingleObjectClone(GameObject source)
         {
             var clone = new GameObject(source.name)
             {
@@ -840,26 +849,33 @@ namespace Nexus.NxScene.Editor
                 ComponentUtility.CopyComponent(component);
                 ComponentUtility.PasteComponentAsNew(clone);
             }
-            var sourceFilters = source.GetComponents<MeshFilter>();
-            var cloneFilters = clone.GetComponents<MeshFilter>();
-            for (int i = 0; i < sourceFilters.Length && i < cloneFilters.Length; i++)
-                cloneFilters[i].sharedMesh = EnsureBundleMesh(sourceFilters[i].sharedMesh, tempAssetRoot, createdAssets, generatedMeshAssets);
-            var sourceSkinned = source.GetComponents<SkinnedMeshRenderer>();
-            var cloneSkinned = clone.GetComponents<SkinnedMeshRenderer>();
-            for (int i = 0; i < sourceSkinned.Length && i < cloneSkinned.Length; i++)
-                cloneSkinned[i].sharedMesh = EnsureBundleMesh(sourceSkinned[i].sharedMesh, tempAssetRoot, createdAssets, generatedMeshAssets);
-            var sourceMeshColliders = source.GetComponents<MeshCollider>();
-            var cloneMeshColliders = clone.GetComponents<MeshCollider>();
-            for (int i = 0; i < sourceMeshColliders.Length && i < cloneMeshColliders.Length; i++)
-                cloneMeshColliders[i].sharedMesh = EnsureBundleMesh(sourceMeshColliders[i].sharedMesh, tempAssetRoot, createdAssets, generatedMeshAssets);
-            var sourceTerrain = source.GetComponent<Terrain>();
-            var cloneTerrain = clone.GetComponent<Terrain>();
-            var terrainDataCopies = new Dictionary<int, TerrainData>();
-            if (sourceTerrain != null && cloneTerrain != null) cloneTerrain.terrainData = CreateBundleTerrainData(sourceTerrain.terrainData, tempAssetRoot, createdAssets, terrainDataCopies);
-            var sourceCollider = source.GetComponent<TerrainCollider>();
-            var cloneCollider = clone.GetComponent<TerrainCollider>();
-            if (sourceCollider != null && cloneCollider != null) cloneCollider.terrainData = CreateBundleTerrainData(sourceCollider.terrainData, tempAssetRoot, createdAssets, terrainDataCopies);
             return clone;
+        }
+
+        private static void PrepareBundleClone(GameObject clone, string tempAssetRoot, List<string> createdAssets, Dictionary<int, Mesh> generatedMeshAssets)
+        {
+            var terrainDataCopies = new Dictionary<int, TerrainData>();
+            var materialCopies = new Dictionary<int, Material>();
+            foreach (var filter in clone.GetComponentsInChildren<MeshFilter>(true))
+                filter.sharedMesh = EnsureBundleMesh(filter.sharedMesh, tempAssetRoot, createdAssets, generatedMeshAssets);
+            foreach (var renderer in clone.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+                renderer.sharedMesh = EnsureBundleMesh(renderer.sharedMesh, tempAssetRoot, createdAssets, generatedMeshAssets);
+            foreach (var collider in clone.GetComponentsInChildren<MeshCollider>(true))
+                collider.sharedMesh = EnsureBundleMesh(collider.sharedMesh, tempAssetRoot, createdAssets, generatedMeshAssets);
+            foreach (var terrain in clone.GetComponentsInChildren<Terrain>(true))
+            {
+                terrain.terrainData = CreateBundleTerrainData(terrain.terrainData, tempAssetRoot, createdAssets, terrainDataCopies);
+                terrain.materialTemplate = EnsureBundleMaterial(terrain.materialTemplate, tempAssetRoot, createdAssets, materialCopies);
+            }
+            foreach (var collider in clone.GetComponentsInChildren<TerrainCollider>(true))
+                collider.terrainData = CreateBundleTerrainData(collider.terrainData, tempAssetRoot, createdAssets, terrainDataCopies);
+            foreach (var renderer in clone.GetComponentsInChildren<Renderer>(true))
+            {
+                var materials = renderer.sharedMaterials;
+                for (int i = 0; i < materials.Length; i++)
+                    materials[i] = EnsureBundleMaterial(materials[i], tempAssetRoot, createdAssets, materialCopies);
+                renderer.sharedMaterials = materials;
+            }
         }
 
         private static Mesh EnsureBundleMesh(Mesh source, string tempAssetRoot, List<string> createdAssets, Dictionary<int, Mesh> generatedMeshAssets)
@@ -883,7 +899,7 @@ namespace Nexus.NxScene.Editor
             if (source == null) return null;
             if (copies.TryGetValue(source.GetInstanceID(), out var cached)) return cached;
             string sourcePath = AssetDatabase.GetAssetPath(source);
-            if (sourcePath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) || sourcePath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+            if (IsStandaloneAsset(source, sourcePath))
             {
                 copies[source.GetInstanceID()] = source;
                 return source;
@@ -895,6 +911,32 @@ namespace Nexus.NxScene.Editor
             createdAssets.Add(assetPath);
             copies[source.GetInstanceID()] = copy;
             return copy;
+        }
+
+        private static Material EnsureBundleMaterial(Material source, string tempAssetRoot, List<string> createdAssets, Dictionary<int, Material> copies)
+        {
+            if (source == null) return null;
+            string sourcePath = AssetDatabase.GetAssetPath(source);
+            if (sourcePath.StartsWith("Library/", StringComparison.OrdinalIgnoreCase) || sourcePath.StartsWith("Resources/", StringComparison.OrdinalIgnoreCase)) return source;
+            if (IsStandaloneAsset(source, sourcePath)) return source;
+            if (copies.TryGetValue(source.GetInstanceID(), out var cached)) return cached;
+            var copy = UnityEngine.Object.Instantiate(source);
+            copy.name = source.name;
+            string assetPath = AssetDatabase.GenerateUniqueAssetPath(tempAssetRoot + "/" + Sanitize(source.name) + ".mat");
+            AssetDatabase.CreateAsset(copy, assetPath);
+            if (AssetDatabase.LoadAssetAtPath<Material>(assetPath) == null) throw new InvalidDataException($"Could not create an export asset for material '{source.name}'");
+            createdAssets.Add(assetPath);
+            copies.Add(source.GetInstanceID(), copy);
+            return copy;
+        }
+
+        private static bool IsStandaloneAsset(UnityEngine.Object asset, string path)
+        {
+            return !string.IsNullOrWhiteSpace(path) &&
+                (path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase) || path.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase)) &&
+                !path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase) &&
+                !path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) &&
+                AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(path) == asset;
         }
 
         private static string GetHierarchyPath(Transform source)
@@ -1016,6 +1058,10 @@ namespace Nexus.NxScene.Editor
                 {
                     if (renderer != null && renderer.sharedMesh != null) paths.Add(AssetDatabase.GetAssetPath(renderer.sharedMesh));
                 }
+                foreach (var collider in item.source.GetComponentsInChildren<MeshCollider>(true))
+                {
+                    if (collider != null && collider.sharedMesh != null) paths.Add(AssetDatabase.GetAssetPath(collider.sharedMesh));
+                }
             }
 
             try
@@ -1024,9 +1070,10 @@ namespace Nexus.NxScene.Editor
                 {
                     if (string.IsNullOrEmpty(path)) continue;
                     var importer = AssetImporter.GetAtPath(path) as ModelImporter;
-                    if (importer == null || importer.isReadable) continue;
-                    states.Add(new ModelReadabilityState { path = path, wasReadable = importer.isReadable });
+                    if (importer == null || (importer.isReadable && importer.meshCompression == ModelImporterMeshCompression.Off)) continue;
+                    states.Add(new ModelReadabilityState { path = path, wasReadable = importer.isReadable, meshCompression = importer.meshCompression });
                     importer.isReadable = true;
+                    importer.meshCompression = ModelImporterMeshCompression.Off;
                     importer.SaveAndReimport();
                 }
             }
@@ -1043,8 +1090,9 @@ namespace Nexus.NxScene.Editor
             foreach (var state in states)
             {
                 var importer = AssetImporter.GetAtPath(state.path) as ModelImporter;
-                if (importer == null || importer.isReadable == state.wasReadable) continue;
+                if (importer == null || (importer.isReadable == state.wasReadable && importer.meshCompression == state.meshCompression)) continue;
                 importer.isReadable = state.wasReadable;
+                importer.meshCompression = state.meshCompression;
                 importer.SaveAndReimport();
             }
         }
