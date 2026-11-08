@@ -405,8 +405,10 @@ namespace Nexus.NxScene.Editor
                     bundles = targets.Select(target => new NxScenePlatformBundle { platform = target.Item1, path = "bundles/" + target.Item1 + "/" + bundleFileName, asset = item.assetPath.Replace('\\', '/').ToLowerInvariant() }).ToArray()
                 }).ToArray();
                 var readabilityStates = MakeSourceMeshesReadable(assetItems);
+                bool stripUnusedMeshComponents = PlayerSettings.stripUnusedMeshComponents;
                 try
                 {
+                    PlayerSettings.stripUnusedMeshComponents = false;
                     foreach (var target in targets)
                     {
                         string platformLabel = target.Item2 == BuildTarget.StandaloneWindows64 ? T("windows") : T("linux");
@@ -422,6 +424,7 @@ namespace Nexus.NxScene.Editor
                 }
                 finally
                 {
+                    PlayerSettings.stripUnusedMeshComponents = stripUnusedMeshComponents;
                     RestoreSourceMeshReadability(readabilityStates);
                 }
 
@@ -688,8 +691,17 @@ namespace Nexus.NxScene.Editor
             if (source.vertexCount != bundled.vertexCount || source.subMeshCount != bundled.subMeshCount || source.indexFormat != bundled.indexFormat || source.bounds != bundled.bounds)
                 throw new InvalidDataException($"Export bundle mesh differs from source: {prefabName}/{path}/{component}/{index}");
             if (!source.isReadable || !bundled.isReadable) return;
-            if (!source.vertices.SequenceEqual(bundled.vertices) || !source.normals.SequenceEqual(bundled.normals) || !source.tangents.SequenceEqual(bundled.tangents) || !source.uv.SequenceEqual(bundled.uv) || !source.uv2.SequenceEqual(bundled.uv2) || !source.uv3.SequenceEqual(bundled.uv3) || !source.uv4.SequenceEqual(bundled.uv4) || !source.colors.SequenceEqual(bundled.colors) || !source.boneWeights.SequenceEqual(bundled.boneWeights) || !source.bindposes.SequenceEqual(bundled.bindposes))
-                throw new InvalidDataException($"Export bundle mesh data differs from source: {prefabName}/{path}/{component}/{index}");
+            string channel = !source.vertices.SequenceEqual(bundled.vertices) ? "vertices" :
+                !source.normals.SequenceEqual(bundled.normals) ? "normals" :
+                !source.tangents.SequenceEqual(bundled.tangents) ? "tangents" :
+                !source.uv.SequenceEqual(bundled.uv) ? "uv" :
+                !source.uv2.SequenceEqual(bundled.uv2) ? "uv2" :
+                !source.uv3.SequenceEqual(bundled.uv3) ? "uv3" :
+                !source.uv4.SequenceEqual(bundled.uv4) ? "uv4" :
+                !source.colors.SequenceEqual(bundled.colors) ? "colors" :
+                !source.boneWeights.SequenceEqual(bundled.boneWeights) ? "boneWeights" :
+                !source.bindposes.SequenceEqual(bundled.bindposes) ? "bindposes" : null;
+            if (channel != null) throw new InvalidDataException($"Export bundle mesh data differs from source: {prefabName}/{path}/{component}/{index} ({channel})");
             for (int subMesh = 0; subMesh < source.subMeshCount; subMesh++)
                 if (source.GetTopology(subMesh) != bundled.GetTopology(subMesh) || !source.GetIndices(subMesh).SequenceEqual(bundled.GetIndices(subMesh)))
                     throw new InvalidDataException($"Export bundle mesh indices differ from source: {prefabName}/{path}/{component}/{index}");
