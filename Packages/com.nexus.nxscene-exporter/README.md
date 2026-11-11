@@ -2,7 +2,7 @@
 
 Exports standard URP `.nxscene` packages for local Nexus use.
 
-Scripts are removed from export copies. Marketplace catalog metadata is added by Nexus owner publishing tools.
+Scripts are removed from export copies. Built-in URP Volume, camera data and light data are preserved. Marketplace catalog metadata is added by Nexus owner publishing tools.
 
 VFX Graph components are not exported. The exporter reports them in the package diagnostics.
 

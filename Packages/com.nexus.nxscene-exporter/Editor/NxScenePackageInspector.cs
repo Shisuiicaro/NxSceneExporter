@@ -187,13 +187,20 @@ namespace Nexus.NxScene.Editor
                 var allComponents = prefab.GetComponentsInChildren<Component>(true).Where(component => component != null).ToArray();
                 var particles = allComponents.OfType<ParticleSystem>().ToArray();
                 var effects = allComponents.Count(component => component.GetType().FullName == "UnityEngine.VFX.VisualEffect");
+                var volumes = allComponents.Where(component => component.GetType().FullName == "UnityEngine.Rendering.Volume").ToArray();
                 var monos = allComponents.Count(component => component is MonoBehaviour);
                 if (particles.Length > 0) particlePrefabs++;
                 visualEffects += effects;
                 monoBehaviours += monos;
                 if (components.Length == 1 && components[0] is Transform) emptyPrefabs++;
-                if (particles.Length == 0 && effects == 0) continue;
+                if (particles.Length == 0 && effects == 0 && volumes.Length == 0) continue;
                 report.AppendLine("- " + prefab.name + ": " + string.Join(", ", components.Select(component => component.GetType().Name).ToArray()));
+                foreach (var volume in volumes)
+                {
+                    var property = volume.GetType().GetProperty("sharedProfile", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+                    var profile = property?.GetValue(volume, null) as UnityEngine.Object;
+                    report.AppendLine("  Volume " + volume.name + ": profile=" + (profile != null ? profile.name : "missing"));
+                }
                 foreach (var particle in particles)
                 {
                     report.AppendLine("  ParticleSystem " + particle.name + ": startColor=" + particle.main.startColor.color + "; emission=" + particle.emission.rateOverTime.constantMin + ".." + particle.emission.rateOverTime.constantMax + "; customData=" + particle.customData.enabled + "; textureSheet=" + particle.textureSheetAnimation.enabled);

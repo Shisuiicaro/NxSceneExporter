@@ -109,6 +109,8 @@ namespace Nexus.NxScene.Editor
             { "bundleParticleRendererMissing", "Exported particle system {0} has no matching renderer" },
             { "bundleParticleRendererChanged", "Exported particle system {0} changed renderer settings" },
             { "bundleParticleModuleChanged", "Exported particle system {0} changed module {1}" },
+            { "bundlePreservedComponentMissing", "Exported object {0} lost component {1}" },
+            { "bundleVolumeChanged", "Exported volume {0} changed its profile" },
             { "diagnostics", "Diagnostics" },
             { "diagnosticsHint", "Scans the source for particle systems and VFX Graph components." },
             { "runDiagnostics", "Run diagnostics" },
@@ -190,6 +192,8 @@ namespace Nexus.NxScene.Editor
             { "bundleParticleRendererMissing", "O sistema de partículas exportado {0} está sem renderizador" },
             { "bundleParticleRendererChanged", "O sistema de partículas exportado {0} mudou configurações do renderizador" },
             { "bundleParticleModuleChanged", "O sistema de partículas exportado {0} mudou o módulo {1}" },
+            { "bundlePreservedComponentMissing", "O objeto exportado {0} perdeu o componente {1}" },
+            { "bundleVolumeChanged", "O volume exportado {0} mudou o perfil" },
             { "diagnostics", "Diagnóstico" },
             { "diagnosticsHint", "Verifica a origem em busca de sistemas de partículas e componentes VFX Graph." },
             { "runDiagnostics", "Executar diagnóstico" },
@@ -600,7 +604,23 @@ namespace Nexus.NxScene.Editor
             {
                 AddDecalMaterialAssets(assetNames, GetDecalMaterial(projector));
             }
+            foreach (var root in items.Select(item => item.source).Where(root => root != null))
+            {
+                AddPreservedComponentAssets(assetNames, root);
+            }
             return assetNames.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+
+        private static void AddPreservedComponentAssets(HashSet<string> assetNames, GameObject root)
+        {
+            foreach (var component in root.GetComponentsInChildren<Component>(true))
+            {
+                if (component == null || !IsPreservedSceneComponent(component)) continue;
+                if (component.GetType().FullName != "UnityEngine.Rendering.Volume") continue;
+                var property = component.GetType().GetProperty("sharedProfile", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+                var profile = property?.GetValue(component, null) as UnityEngine.Object;
+                if (profile != null) AddPackageAssetPath(assetNames, AssetDatabase.GetAssetPath(profile));
+            }
         }
 
         private static void AddShaderAssetPaths(HashSet<string> assetNames, IEnumerable<Material> materials)
@@ -748,6 +768,33 @@ namespace Nexus.NxScene.Editor
                 throw new InvalidDataException(string.Format(T("bundleParticleModuleChanged"), source.name, "startColor"));
         }
 
+        private void ValidatePreservedComponents(ExportItem item, GameObject bundledRoot)
+        {
+            var sourceComponents = (m_source == SourceKind.CurrentScene ? item.source.GetComponents<Component>() : item.source.GetComponentsInChildren<Component>(true))
+                .Where(component => component != null && IsPreservedSceneComponent(component)).ToArray();
+            var bundledComponents = bundledRoot.GetComponentsInChildren<Component>(true)
+                .Where(component => component != null && IsPreservedSceneComponent(component)).ToArray();
+            var matched = new HashSet<Component>();
+            foreach (var sourceComponent in sourceComponents)
+            {
+                string path = GetRelativePath(item.source.transform, sourceComponent.transform);
+                var bundledComponent = bundledComponents.FirstOrDefault(candidate => !matched.Contains(candidate) && candidate.GetType() == sourceComponent.GetType() && GetRelativePath(bundledRoot.transform, candidate.transform) == path);
+                if (bundledComponent == null) throw new InvalidDataException(string.Format(T("bundlePreservedComponentMissing"), sourceComponent.name, sourceComponent.GetType().FullName));
+                matched.Add(bundledComponent);
+                if (sourceComponent.GetType().FullName != "UnityEngine.Rendering.Volume") continue;
+                var sourceProfile = GetVolumeProfile(sourceComponent);
+                var bundledProfile = GetVolumeProfile(bundledComponent);
+                if ((sourceProfile == null) != (bundledProfile == null) || (sourceProfile != null && sourceProfile.name != bundledProfile.name))
+                    throw new InvalidDataException(string.Format(T("bundleVolumeChanged"), sourceComponent.name));
+            }
+        }
+
+        private static UnityEngine.Object GetVolumeProfile(Component volume)
+        {
+            var property = volume.GetType().GetProperty("sharedProfile", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+            return property?.GetValue(volume, null) as UnityEngine.Object;
+        }
+
         private static bool GetUseCustomVertexStreams(ParticleSystemRenderer renderer)
         {
             var serialized = new SerializedObject(renderer);
@@ -811,6 +858,7 @@ namespace Nexus.NxScene.Editor
                     ValidateTerrainData(item, bundledRoot);
                     ValidateDecalMaterials(item, bundledRoot);
                     ValidateParticleSystems(item, bundledRoot);
+                    ValidatePreservedComponents(item, bundledRoot);
                 }
             }
             finally
@@ -1006,7 +1054,8 @@ namespace Nexus.NxScene.Editor
             clone.SetActive(source.activeSelf);
             foreach (var component in source.GetComponents<Component>())
             {
-                if (component == null || component is Transform || component is MonoBehaviour || component is LODGroup) continue;
+                if (component == null || component is Transform || component is LODGroup) continue;
+                if (component is MonoBehaviour && !IsPreservedSceneComponent(component)) continue;
                 ComponentUtility.CopyComponent(component);
                 ComponentUtility.PasteComponentAsNew(clone);
             }
@@ -1252,7 +1301,18 @@ namespace Nexus.NxScene.Editor
         {
             if (component == null || component is LODGroup) return false;
             if (!(component is MonoBehaviour)) return false;
-            return m_source != SourceKind.PrefabFolder || component.GetType().FullName != "UnityEngine.Rendering.Universal.DecalProjector";
+            if (IsPreservedSceneComponent(component)) return false;
+            return true;
+        }
+
+        private static bool IsPreservedSceneComponent(Component component)
+        {
+            if (component == null) return false;
+            var type = component.GetType().FullName;
+            return type == "UnityEngine.Rendering.Volume" ||
+                   type == "UnityEngine.Rendering.Universal.UniversalAdditionalCameraData" ||
+                   type == "UnityEngine.Rendering.Universal.UniversalAdditionalLightData" ||
+                   type == "UnityEngine.Rendering.Universal.DecalProjector";
         }
 
         private static bool IsVisualEffect(Component component)
@@ -1360,7 +1420,7 @@ namespace Nexus.NxScene.Editor
 
         private static void StripScripts(GameObject root)
         {
-            var components = root.GetComponentsInChildren<MonoBehaviour>(true).Where(component => component != null && component.GetType().FullName != "UnityEngine.Rendering.Universal.DecalProjector").ToList();
+            var components = root.GetComponentsInChildren<MonoBehaviour>(true).Where(component => component != null && !IsPreservedSceneComponent(component)).ToList();
             while (components.Count > 0)
             {
                 var component = components.FirstOrDefault(candidate => !components.Any(other => other != candidate && RequiresComponent(other.GetType(), candidate.GetType())));
