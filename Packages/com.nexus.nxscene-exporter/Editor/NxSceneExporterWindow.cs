@@ -101,7 +101,22 @@ namespace Nexus.NxScene.Editor
             { "bundleTerrainDataMissing", "Exported terrain {0} is missing its terrain data" },
             { "bundleTerrainMissing", "Exported terrain {0} was not found" },
             { "bundleTerrainDataChanged", "Exported terrain {0} has different terrain data" },
-            { "bundleMaterialAssignmentChanged", "Exported renderer {0} lost material {1}: {2}" }
+            { "bundleMaterialAssignmentChanged", "Exported renderer {0} lost material {1}: {2}" },
+            { "bundleMaterialShaderChanged", "Bundle material {0} changed shader from {1} to {2}" },
+            { "bundleMaterialQueueChanged", "Bundle material {0} changed render queue from {1} to {2}" },
+            { "bundleMaterialKeywordsChanged", "Bundle material {0} lost shader keywords" },
+            { "bundleParticleMissing", "Exported particle system {0} has no matching source particle system" },
+            { "bundleParticleRendererMissing", "Exported particle system {0} has no matching renderer" },
+            { "bundleParticleRendererChanged", "Exported particle system {0} changed renderer settings" },
+            { "bundleParticleModuleChanged", "Exported particle system {0} changed module {1}" },
+            { "diagnostics", "Diagnostics" },
+            { "diagnosticsHint", "Scans the source for particle systems and VFX Graph components." },
+            { "runDiagnostics", "Run diagnostics" },
+            { "openDiagnostics", "Open diagnostics file" },
+            { "vfxGraphUnsupported", "VFX Graph is not exported: {0} object(s) lose their Visual Effect component" },
+            { "vfxGraphRemoved", "VFX Graph removed: {0}" },
+            { "diagnosticsWritten", "Diagnostics written to {0}" },
+            { "diagnosticsSummary", "Particle systems: {0}; VFX Graph components: {1}; removed components: {2}" }
         };
 
         private static readonly Dictionary<string, string> Portuguese = new Dictionary<string, string>
@@ -167,7 +182,22 @@ namespace Nexus.NxScene.Editor
             { "bundleTerrainDataMissing", "O terreno exportado {0} está sem os dados do terreno" },
             { "bundleTerrainMissing", "O terreno exportado {0} não foi encontrado" },
             { "bundleTerrainDataChanged", "O terreno exportado {0} possui dados diferentes" },
-            { "bundleMaterialAssignmentChanged", "O renderizador exportado {0} perdeu o material {1}: {2}" }
+            { "bundleMaterialAssignmentChanged", "O renderizador exportado {0} perdeu o material {1}: {2}" },
+            { "bundleMaterialShaderChanged", "O material {0} do bundle mudou o shader de {1} para {2}" },
+            { "bundleMaterialQueueChanged", "O material {0} do bundle mudou a fila de renderização de {1} para {2}" },
+            { "bundleMaterialKeywordsChanged", "O material {0} do bundle perdeu palavras-chave do shader" },
+            { "bundleParticleMissing", "O sistema de partículas exportado {0} não corresponde a um sistema de origem" },
+            { "bundleParticleRendererMissing", "O sistema de partículas exportado {0} está sem renderizador" },
+            { "bundleParticleRendererChanged", "O sistema de partículas exportado {0} mudou configurações do renderizador" },
+            { "bundleParticleModuleChanged", "O sistema de partículas exportado {0} mudou o módulo {1}" },
+            { "diagnostics", "Diagnóstico" },
+            { "diagnosticsHint", "Verifica a origem em busca de sistemas de partículas e componentes VFX Graph." },
+            { "runDiagnostics", "Executar diagnóstico" },
+            { "openDiagnostics", "Abrir arquivo de diagnóstico" },
+            { "vfxGraphUnsupported", "VFX Graph não é exportado: {0} objeto(s) perdem o componente Visual Effect" },
+            { "vfxGraphRemoved", "VFX Graph removido: {0}" },
+            { "diagnosticsWritten", "Diagnóstico salvo em {0}" },
+            { "diagnosticsSummary", "Sistemas de partículas: {0}; componentes VFX Graph: {1}; componentes removidos: {2}" }
         };
 
         private SourceKind m_source;
@@ -181,6 +211,9 @@ namespace Nexus.NxScene.Editor
         private Vector2 m_scroll;
         private readonly List<string> m_errors = new List<string>();
         private readonly List<string> m_warnings = new List<string>();
+        private string m_diagnosticsSummary;
+        private string m_lastDiagnosticsPath;
+        private string m_lastPackagePath;
 
         [MenuItem("Tools/Nexus/Export Scene Package", false, 2000)]
         private static void OpenCurrentScene()
@@ -228,6 +261,7 @@ namespace Nexus.NxScene.Editor
             DrawOptions();
             DrawOutput();
             DrawValidation();
+            DrawDiagnostics();
             EditorGUILayout.EndScrollView();
         }
 
@@ -310,6 +344,27 @@ namespace Nexus.NxScene.Editor
             EndCard();
         }
 
+        private void DrawDiagnostics()
+        {
+            BeginCard(T("diagnostics"));
+            EditorGUILayout.LabelField(T("diagnosticsHint"), EditorStyles.wordWrappedLabel);
+            if (GUILayout.Button(T("runDiagnostics"))) RunDiagnostics();
+            if (!string.IsNullOrEmpty(m_diagnosticsSummary)) EditorGUILayout.HelpBox(m_diagnosticsSummary, MessageType.Info);
+            using (new EditorGUI.DisabledScope(string.IsNullOrEmpty(m_lastDiagnosticsPath) || !File.Exists(m_lastDiagnosticsPath)))
+            {
+                if (GUILayout.Button(T("openDiagnostics"))) EditorUtility.RevealInFinder(m_lastDiagnosticsPath);
+            }
+            EndCard();
+        }
+
+        private void RunDiagnostics()
+        {
+            var diagnostics = BuildDiagnostics(GetRoots(), null, null);
+            m_diagnosticsSummary = string.Format(T("diagnosticsSummary"), diagnostics.particleSystemCount, diagnostics.visualEffectCount, diagnostics.removedComponentCount);
+            LogDiagnostics(diagnostics);
+            Repaint();
+        }
+
         private void Validate()
         {
             m_errors.Clear();
@@ -327,6 +382,8 @@ namespace Nexus.NxScene.Editor
             if (m_source == SourceKind.CurrentScene && string.IsNullOrWhiteSpace(SceneManager.GetActiveScene().path)) m_errors.Add(T("sceneUnsaved"));
             var roots = GetRoots();
             if (roots.Count == 0) m_errors.Add(m_source == SourceKind.CurrentScene ? T("sceneUnsaved") : T("noPrefabs"));
+            var diagnostics = BuildDiagnostics(roots, null, null);
+            if (diagnostics.visualEffectCount > 0) m_warnings.Add(string.Format(T("vfxGraphUnsupported"), diagnostics.visualEffectCount));
             ValidateMaterialShaders(roots);
             try { BuildLodGroups(roots.Select(root => new ExportItem { source = root }).ToList()); }
             catch { m_errors.Add(T("lodRefsInvalid")); }
@@ -434,6 +491,9 @@ namespace Nexus.NxScene.Editor
                 }
 
                 string packageName = string.IsNullOrWhiteSpace(m_packageName) ? T("packageDefault") : m_packageName.Trim();
+                var diagnostics = BuildDiagnostics(roots, assetItems, items);
+                m_diagnosticsSummary = string.Format(T("diagnosticsSummary"), diagnostics.particleSystemCount, diagnostics.visualEffectCount, diagnostics.removedComponentCount);
+                LogDiagnostics(diagnostics);
                 var manifest = new NxSceneManifest
                 {
                     version = "4",
@@ -446,8 +506,11 @@ namespace Nexus.NxScene.Editor
                     prefabs = manifestPrefabs,
                     instances = BuildInstances(items),
                     lodGroups = BuildLodGroups(items),
-                    files = new NxSceneFileEntry[0]
+                    files = new NxSceneFileEntry[0],
+                    diagnostics = diagnostics
                 };
+                string diagnosticsJson = JsonUtility.ToJson(diagnostics, true);
+                File.WriteAllText(Path.Combine(tempDir, "diagnostics.json"), diagnosticsJson);
                 File.WriteAllText(Path.Combine(tempDir, "manifest.json"), JsonUtility.ToJson(manifest, true));
                 if (m_thumbnail && m_source == SourceKind.CurrentScene) TryCaptureThumbnail(Path.Combine(tempDir, "thumbnail.png"));
                 manifest.files = BuildInventory(tempDir);
@@ -457,6 +520,11 @@ namespace Nexus.NxScene.Editor
                 if (File.Exists(outputPath)) File.Delete(outputPath);
                 CreateZip(outputPath, tempDir);
                 if (!File.Exists(outputPath) || Directory.Exists(outputPath)) throw new IOException(T("packageMissing"));
+                string sidecarPath = outputPath + ".diagnostics.json";
+                File.WriteAllText(sidecarPath, diagnosticsJson);
+                m_lastDiagnosticsPath = sidecarPath;
+                m_lastPackagePath = outputPath;
+                Debug.Log(string.Format(T("diagnosticsWritten"), sidecarPath));
                 EditorUtility.ClearProgressBar();
                 EditorUtility.RevealInFinder(m_outputFolder);
                 EditorUtility.DisplayDialog(T("success"), outputPath, T("openFolder"));
@@ -617,6 +685,86 @@ namespace Nexus.NxScene.Editor
             }
         }
 
+        private void ValidateParticleSystems(ExportItem item, GameObject bundledRoot)
+        {
+            var sourceParticles = m_source == SourceKind.CurrentScene
+                ? item.source.GetComponents<ParticleSystem>()
+                : item.source.GetComponentsInChildren<ParticleSystem>(true);
+            var bundledParticles = bundledRoot.GetComponentsInChildren<ParticleSystem>(true);
+            var matched = new HashSet<ParticleSystem>();
+            foreach (var sourceParticle in sourceParticles)
+            {
+                if (sourceParticle == null) continue;
+                string path = GetRelativePath(item.source.transform, sourceParticle.transform);
+                var bundledParticle = bundledParticles.FirstOrDefault(candidate => !matched.Contains(candidate) && GetRelativePath(bundledRoot.transform, candidate.transform) == path);
+                if (bundledParticle == null) throw new InvalidDataException(string.Format(T("bundleParticleMissing"), sourceParticle.name));
+                matched.Add(bundledParticle);
+                ValidateParticleRenderer(sourceParticle, bundledParticle);
+                ValidateParticleModules(sourceParticle, bundledParticle);
+            }
+        }
+
+        private void ValidateParticleRenderer(ParticleSystem source, ParticleSystem bundled)
+        {
+            var sourceRenderer = source.GetComponent<ParticleSystemRenderer>();
+            var bundledRenderer = bundled.GetComponent<ParticleSystemRenderer>();
+            if (sourceRenderer == null && bundledRenderer == null) return;
+            if (sourceRenderer == null || bundledRenderer == null) throw new InvalidDataException(string.Format(T("bundleParticleRendererMissing"), source.name));
+            var sourceMaterials = sourceRenderer.sharedMaterials ?? Array.Empty<Material>();
+            var bundledMaterials = bundledRenderer.sharedMaterials ?? Array.Empty<Material>();
+            var sourceStreams = GetVertexStreams(sourceRenderer);
+            var bundledStreams = GetVertexStreams(bundledRenderer);
+            if (sourceRenderer.renderMode != bundledRenderer.renderMode ||
+                sourceRenderer.sortMode != bundledRenderer.sortMode ||
+                GetUseCustomVertexStreams(sourceRenderer) != GetUseCustomVertexStreams(bundledRenderer) ||
+                !sourceStreams.SequenceEqual(bundledStreams) ||
+                sourceMaterials.Length != bundledMaterials.Length)
+                throw new InvalidDataException(string.Format(T("bundleParticleRendererChanged"), source.name));
+            for (int slot = 0; slot < sourceMaterials.Length; slot++)
+            {
+                var sourceMaterial = sourceMaterials[slot];
+                var bundledMaterial = bundledMaterials[slot];
+                if (sourceMaterial == null && bundledMaterial == null) continue;
+                if (sourceMaterial == null || bundledMaterial == null || sourceMaterial.name != bundledMaterial.name)
+                    throw new InvalidDataException(string.Format(T("bundleMaterialAssignmentChanged"), source.name, slot + 1, sourceMaterial != null ? sourceMaterial.name : "null"));
+            }
+        }
+
+        private void ValidateParticleModules(ParticleSystem source, ParticleSystem bundled)
+        {
+            if (source.main.loop != bundled.main.loop ||
+                source.main.playOnAwake != bundled.main.playOnAwake ||
+                !Mathf.Approximately(source.main.startSize.constantMin, bundled.main.startSize.constantMin) ||
+                !Mathf.Approximately(source.main.startSize.constantMax, bundled.main.startSize.constantMax) ||
+                !Mathf.Approximately(source.main.startLifetime.constantMin, bundled.main.startLifetime.constantMin) ||
+                !Mathf.Approximately(source.main.startLifetime.constantMax, bundled.main.startLifetime.constantMax) ||
+                !Mathf.Approximately(source.emission.rateOverTime.constantMin, bundled.emission.rateOverTime.constantMin) ||
+                !Mathf.Approximately(source.emission.rateOverTime.constantMax, bundled.emission.rateOverTime.constantMax) ||
+                source.customData.enabled != bundled.customData.enabled ||
+                source.textureSheetAnimation.enabled != bundled.textureSheetAnimation.enabled)
+                throw new InvalidDataException(string.Format(T("bundleParticleModuleChanged"), source.name, "main/emission/customData/textureSheetAnimation"));
+            if (source.main.startColor.mode != bundled.main.startColor.mode ||
+                (source.main.startColor.mode == ParticleSystemGradientMode.Color && source.main.startColor.color != bundled.main.startColor.color))
+                throw new InvalidDataException(string.Format(T("bundleParticleModuleChanged"), source.name, "startColor"));
+        }
+
+        private static bool GetUseCustomVertexStreams(ParticleSystemRenderer renderer)
+        {
+            var serialized = new SerializedObject(renderer);
+            var property = serialized.FindProperty("m_UseCustomVertexStreams");
+            return property != null && property.boolValue;
+        }
+
+        private static int[] GetVertexStreams(ParticleSystemRenderer renderer)
+        {
+            var serialized = new SerializedObject(renderer);
+            var property = serialized.FindProperty("m_VertexStreams");
+            if (property == null || !property.isArray) return Array.Empty<int>();
+            var streams = new int[property.arraySize];
+            for (int i = 0; i < streams.Length; i++) streams[i] = property.GetArrayElementAtIndex(i).intValue;
+            return streams;
+        }
+
         private void ValidateBuiltBundle(string bundlePath, IEnumerable<ExportItem> items)
         {
             var bundle = AssetBundle.LoadFromFile(bundlePath);
@@ -645,6 +793,11 @@ namespace Nexus.NxScene.Editor
                             if (bundledMaterial.shader == null || ((!bundledMaterial.shader.isSupported || bundledMaterial.shader.passCount == 0) && !IsBuiltInConvertibleShaderName(bundledMaterial.shader.name))) throw new InvalidDataException(string.Format(T("bundleMaterialInvalid"), bundledMaterial.name, bundledMaterial.shader != null ? bundledMaterial.shader.name : "missing"));
                             var sourceMaterial = slot < sourceMaterials.Length ? sourceMaterials[slot] : null;
                             if (sourceMaterial == null || sourceMaterial.shader == null || IsBuiltInConvertibleShaderName(sourceMaterial.shader.name)) continue;
+                            if (sourceMaterial.shader.name != bundledMaterial.shader.name) throw new InvalidDataException(string.Format(T("bundleMaterialShaderChanged"), bundledMaterial.name, sourceMaterial.shader.name, bundledMaterial.shader.name));
+                            if (sourceMaterial.renderQueue != bundledMaterial.renderQueue) throw new InvalidDataException(string.Format(T("bundleMaterialQueueChanged"), bundledMaterial.name, sourceMaterial.renderQueue, bundledMaterial.renderQueue));
+                            var sourceKeywords = sourceMaterial.shaderKeywords ?? Array.Empty<string>();
+                            var bundledKeywords = bundledMaterial.shaderKeywords ?? Array.Empty<string>();
+                            if (!sourceKeywords.SequenceEqual(bundledKeywords)) throw new InvalidDataException(string.Format(T("bundleMaterialKeywordsChanged"), bundledMaterial.name));
                             for (int i = 0; i < sourceMaterial.shader.GetPropertyCount(); i++)
                             {
                                 if (sourceMaterial.shader.GetPropertyType(i) != ShaderPropertyType.Texture) continue;
@@ -657,6 +810,7 @@ namespace Nexus.NxScene.Editor
                     ValidateMeshAssignments(item, bundledRoot);
                     ValidateTerrainData(item, bundledRoot);
                     ValidateDecalMaterials(item, bundledRoot);
+                    ValidateParticleSystems(item, bundledRoot);
                 }
             }
             finally
@@ -1026,6 +1180,106 @@ namespace Nexus.NxScene.Editor
             var result = groups.ToArray();
             NxSceneLodOwnership.NormalizeNestedRendererOwnership(result, BuildInstances(items));
             return result;
+        }
+
+        private NxSceneDiagnostics BuildDiagnostics(List<GameObject> roots, List<ExportItem> assetItems, List<ExportItem> items)
+        {
+            roots = roots ?? new List<GameObject>();
+            var diagnostics = new NxSceneDiagnostics
+            {
+                exporterVersion = GetExporterVersion(),
+                sceneName = SceneManager.GetActiveScene().name,
+                rootCount = roots.Count,
+                prefabCount = assetItems != null ? assetItems.Count : roots.Count,
+                instanceCount = items != null ? items.Count : roots.Count,
+                prefabs = Array.Empty<NxScenePrefabDiagnostics>(),
+                removedComponents = Array.Empty<NxSceneRemovedComponent>(),
+                warnings = Array.Empty<string>()
+            };
+            var prefabDiagnostics = new List<NxScenePrefabDiagnostics>();
+            var removedComponents = new List<NxSceneRemovedComponent>();
+            var warnings = new HashSet<string>(StringComparer.Ordinal);
+            var prefabItems = assetItems ?? roots.Select(root => new ExportItem { source = root, name = root != null ? root.name : string.Empty }).ToList();
+            int visualEffectCount = 0;
+            int particleSystemCount = 0;
+            foreach (var item in prefabItems)
+            {
+                if (item == null || item.source == null) continue;
+                var sourceComponents = GetSourceComponents(item.source);
+                var removed = sourceComponents.Where(IsRemovedComponent).ToArray();
+                var entry = new NxScenePrefabDiagnostics
+                {
+                    name = item.name,
+                    sourcePath = AssetDatabase.GetAssetPath(item.source),
+                    sourceComponents = sourceComponents.Select(component => component.GetType().FullName).ToArray(),
+                    exportedComponents = sourceComponents.Where(component => !IsRemovedComponent(component)).Select(component => component.GetType().FullName).ToArray(),
+                    removedComponents = removed.Select(component => component.GetType().FullName).ToArray(),
+                    visualEffectCount = sourceComponents.Count(IsVisualEffect),
+                    particleSystemCount = sourceComponents.Count(component => component is ParticleSystem)
+                };
+                prefabDiagnostics.Add(entry);
+                visualEffectCount += entry.visualEffectCount;
+                particleSystemCount += entry.particleSystemCount;
+                foreach (var component in removed)
+                {
+                    var removedEntry = new NxSceneRemovedComponent
+                    {
+                        path = GetHierarchyPath(component.transform),
+                        component = component.GetType().FullName
+                    };
+                    removedComponents.Add(removedEntry);
+                    if (IsVisualEffect(component)) warnings.Add(string.Format(T("vfxGraphRemoved"), removedEntry.path));
+                }
+            }
+            diagnostics.prefabs = prefabDiagnostics.ToArray();
+            diagnostics.removedComponents = removedComponents.ToArray();
+            diagnostics.removedComponentCount = removedComponents.Count;
+            diagnostics.visualEffectCount = visualEffectCount;
+            diagnostics.particleSystemCount = particleSystemCount;
+            diagnostics.warnings = warnings.ToArray();
+            return diagnostics;
+        }
+
+        private Component[] GetSourceComponents(GameObject source)
+        {
+            var components = m_source == SourceKind.CurrentScene
+                ? source.GetComponents<Component>()
+                : source.GetComponentsInChildren<Component>(true);
+            return components.Where(component => component != null).ToArray();
+        }
+
+        private bool IsRemovedComponent(Component component)
+        {
+            if (component == null || component is LODGroup) return false;
+            if (!(component is MonoBehaviour)) return false;
+            return m_source != SourceKind.PrefabFolder || component.GetType().FullName != "UnityEngine.Rendering.Universal.DecalProjector";
+        }
+
+        private static bool IsVisualEffect(Component component)
+        {
+            return component != null && component.GetType().FullName == "UnityEngine.VFX.VisualEffect";
+        }
+
+        private static string GetExporterVersion()
+        {
+            try
+            {
+                var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(NxSceneExporterWindow).Assembly);
+                return package != null && !string.IsNullOrEmpty(package.version) ? package.version : "unknown";
+            }
+            catch
+            {
+                return "unknown";
+            }
+        }
+
+        private static void LogDiagnostics(NxSceneDiagnostics diagnostics)
+        {
+            Debug.Log($"[NxSceneExport] diagnostics exporter={diagnostics.exporterVersion}; roots={diagnostics.rootCount}; prefabs={diagnostics.prefabCount}; instances={diagnostics.instanceCount}; particleSystems={diagnostics.particleSystemCount}; vfxGraphs={diagnostics.visualEffectCount}; removedComponents={diagnostics.removedComponentCount}");
+            if (diagnostics.warnings != null)
+                foreach (var warning in diagnostics.warnings.Take(50)) Debug.LogWarning("[NxSceneExport] " + warning);
+            if (diagnostics.removedComponents != null)
+                foreach (var removed in diagnostics.removedComponents.Take(50)) Debug.Log("[NxSceneExport] removed " + removed.component + " at " + removed.path);
         }
 
         private static NxSceneFileEntry[] BuildInventory(string root)

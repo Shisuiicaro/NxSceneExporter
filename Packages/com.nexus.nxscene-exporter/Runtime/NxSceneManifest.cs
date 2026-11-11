@@ -19,6 +19,42 @@ namespace Nexus.NxScene
         public NxSceneInstance[] instances;
         public NxSceneLodGroup[] lodGroups;
         public NxSceneFileEntry[] files;
+        public NxSceneDiagnostics diagnostics;
+    }
+
+    [Serializable]
+    public sealed class NxSceneDiagnostics
+    {
+        public string exporterVersion;
+        public string sceneName;
+        public int rootCount;
+        public int prefabCount;
+        public int instanceCount;
+        public int visualEffectCount;
+        public int particleSystemCount;
+        public int removedComponentCount;
+        public NxScenePrefabDiagnostics[] prefabs;
+        public NxSceneRemovedComponent[] removedComponents;
+        public string[] warnings;
+    }
+
+    [Serializable]
+    public sealed class NxScenePrefabDiagnostics
+    {
+        public string name;
+        public string sourcePath;
+        public string[] sourceComponents;
+        public string[] exportedComponents;
+        public string[] removedComponents;
+        public int visualEffectCount;
+        public int particleSystemCount;
+    }
+
+    [Serializable]
+    public sealed class NxSceneRemovedComponent
+    {
+        public string path;
+        public string component;
     }
 
     [Serializable]
