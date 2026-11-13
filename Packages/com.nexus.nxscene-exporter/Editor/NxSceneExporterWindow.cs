@@ -93,6 +93,7 @@ namespace Nexus.NxScene.Editor
             { "packageDefault", "Nexus package" },
             { "defaultAuthor", "Nexus creator" },
             { "lodRefsInvalid", "An LOD group references an object outside the scene" },
+            { "lodLevelsNormalized", "LOD levels were normalized for {0} group(s): {1}" },
             { "materialShaderMissing", "Material {0} has no shader" },
             { "materialShaderUnsupported", "Material {0} uses an unsupported shader: {1}" },
             { "bundleMaterialInvalid", "Bundle material {0} cannot load shader {1}" },
@@ -176,6 +177,7 @@ namespace Nexus.NxScene.Editor
             { "packageDefault", "Pacote Nexus" },
             { "defaultAuthor", "Criador Nexus" },
             { "lodRefsInvalid", "Um grupo LOD referencia um objeto fora da cena" },
+            { "lodLevelsNormalized", "Os níveis LOD foram normalizados em {0} grupo(s): {1}" },
             { "materialShaderMissing", "O material {0} não possui shader" },
             { "materialShaderUnsupported", "O material {0} usa um shader incompatível: {1}" },
             { "bundleMaterialInvalid", "O material {0} não carregou o shader {1} no bundle" },
@@ -496,6 +498,9 @@ namespace Nexus.NxScene.Editor
 
                 string packageName = string.IsNullOrWhiteSpace(m_packageName) ? T("packageDefault") : m_packageName.Trim();
                 var diagnostics = BuildDiagnostics(roots, assetItems, items);
+                var lodWarnings = new List<string>();
+                var lodGroups = BuildLodGroups(items, lodWarnings);
+                if (lodWarnings.Count > 0) diagnostics.warnings = (diagnostics.warnings ?? Array.Empty<string>()).Concat(lodWarnings).Distinct(StringComparer.Ordinal).ToArray();
                 m_diagnosticsSummary = string.Format(T("diagnosticsSummary"), diagnostics.particleSystemCount, diagnostics.visualEffectCount, diagnostics.removedComponentCount);
                 LogDiagnostics(diagnostics);
                 var manifest = new NxSceneManifest
@@ -509,7 +514,7 @@ namespace Nexus.NxScene.Editor
                     platforms = targets.Select(target => target.Item1).ToArray(),
                     prefabs = manifestPrefabs,
                     instances = BuildInstances(items),
-                    lodGroups = BuildLodGroups(items),
+                    lodGroups = lodGroups,
                     files = new NxSceneFileEntry[0],
                     diagnostics = diagnostics
                 };
@@ -1178,11 +1183,13 @@ namespace Nexus.NxScene.Editor
             }).ToArray();
         }
 
-        private NxSceneLodGroup[] BuildLodGroups(List<ExportItem> items)
+        private NxSceneLodGroup[] BuildLodGroups(List<ExportItem> items, List<string> warnings = null)
         {
             if (m_source != SourceKind.CurrentScene) return Array.Empty<NxSceneLodGroup>();
             var indexes = items.Select((item, index) => new { item.source, index }).ToDictionary(value => value.source.GetInstanceID(), value => value.index);
             var groups = new List<NxSceneLodGroup>();
+            var normalizedNames = new List<string>();
+            int normalizedGroups = 0;
             for (int instanceIndex = 0; instanceIndex < items.Count; instanceIndex++)
             {
                 var source = items[instanceIndex].source;
@@ -1213,6 +1220,11 @@ namespace Nexus.NxScene.Editor
                             renderers = renderers.ToArray()
                         };
                     }
+                    if (NormalizeLodLevels(levels) > 0)
+                    {
+                        normalizedGroups++;
+                        normalizedNames.Add(source.name);
+                    }
                     groups.Add(new NxSceneLodGroup
                     {
                         instanceIndex = instanceIndex,
@@ -1226,9 +1238,54 @@ namespace Nexus.NxScene.Editor
                     });
                 }
             }
+            if (normalizedGroups > 0 && warnings != null)
+            {
+                string message = string.Format(T("lodLevelsNormalized"), normalizedGroups, string.Join(", ", normalizedNames.Take(10)));
+                warnings.Add(message);
+                Debug.LogWarning("[NxSceneExport] " + message);
+            }
             var result = groups.ToArray();
             NxSceneLodOwnership.NormalizeNestedRendererOwnership(result, BuildInstances(items));
             return result;
+        }
+
+        private static int NormalizeLodLevels(NxSceneLodLevel[] levels)
+        {
+            int changed = 0;
+            var heights = new float[levels.Length];
+            for (int i = 0; i < levels.Length; i++)
+            {
+                if (levels[i] == null)
+                {
+                    levels[i] = new NxSceneLodLevel { renderers = Array.Empty<NxSceneLodRenderer>() };
+                    changed++;
+                }
+                var level = levels[i];
+                if (level.renderers == null)
+                {
+                    level.renderers = Array.Empty<NxSceneLodRenderer>();
+                    changed++;
+                }
+                float height = IsFinite(level.transitionHeight) ? Mathf.Clamp01(level.transitionHeight) : 0f;
+                if (height != level.transitionHeight) changed++;
+                heights[i] = height;
+                float width = IsFinite(level.fadeTransitionWidth) ? Mathf.Clamp01(level.fadeTransitionWidth) : 0f;
+                if (width != level.fadeTransitionWidth) changed++;
+                level.fadeTransitionWidth = width;
+            }
+            Array.Sort(heights);
+            Array.Reverse(heights);
+            for (int i = 0; i < levels.Length; i++)
+            {
+                if (levels[i].transitionHeight != heights[i]) changed++;
+                levels[i].transitionHeight = heights[i];
+            }
+            return changed;
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
         }
 
         private NxSceneDiagnostics BuildDiagnostics(List<GameObject> roots, List<ExportItem> assetItems, List<ExportItem> items)
