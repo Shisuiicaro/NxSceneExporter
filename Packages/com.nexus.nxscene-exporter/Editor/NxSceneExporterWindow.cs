@@ -414,6 +414,7 @@ namespace Nexus.NxScene.Editor
             var assetItems = new List<ExportItem>();
             var assetBySignature = new Dictionary<string, ExportItem>(StringComparer.Ordinal);
             var generatedMeshAssets = new Dictionary<int, Mesh>();
+            var transientReferences = new Dictionary<int, int>();
             bool assetEditing = false;
             try
             {
@@ -428,7 +429,7 @@ namespace Nexus.NxScene.Editor
                 {
                     EditorUtility.DisplayProgressBar(T("exporting"), roots[i].name, (float)i / Math.Max(1, roots.Count));
                     string sourcePath = AssetDatabase.GetAssetPath(roots[i]);
-                    string signature = m_source == SourceKind.PrefabFolder && !string.IsNullOrEmpty(sourcePath) ? "asset:" + AssetDatabase.AssetPathToGUID(sourcePath) : BuildAssetSignature(roots[i]);
+                    string signature = m_source == SourceKind.PrefabFolder && !string.IsNullOrEmpty(sourcePath) ? "asset:" + AssetDatabase.AssetPathToGUID(sourcePath) : BuildAssetSignature(roots[i], transientReferences);
                     if (!assetBySignature.TryGetValue(signature, out var assetItem))
                     {
                         string assetPath = sourcePath;
@@ -1009,7 +1010,7 @@ namespace Nexus.NxScene.Editor
             }
         }
 
-        private static string BuildAssetSignature(GameObject root)
+        private static string BuildAssetSignature(GameObject root, Dictionary<int, int> transientReferences)
         {
             var builder = new StringBuilder();
             builder.Append(root.activeSelf).Append('|').Append(root.layer).Append('|').Append(root.tag);
@@ -1030,7 +1031,24 @@ namespace Nexus.NxScene.Editor
                 if (component == null || component is Transform || component is LODGroup) continue;
                 builder.Append("|C|").Append(GetRelativePath(root.transform, component.transform));
                 builder.Append('|').Append(component.GetType().AssemblyQualifiedName);
-                if (!(component is MonoBehaviour)) builder.Append('|').Append(EditorJsonUtility.ToJson(component));
+                if (!(component is MonoBehaviour))
+                {
+                    builder.Append('|').Append(EditorJsonUtility.ToJson(component));
+                    var property = new SerializedObject(component).GetIterator();
+                    while (property.Next(true))
+                    {
+                        if (property.propertyType != SerializedPropertyType.ObjectReference || property.propertyPath == "m_GameObject") continue;
+                        var reference = property.objectReferenceValue;
+                        if (reference == null || EditorUtility.IsPersistent(reference)) continue;
+                        int id = reference.GetInstanceID();
+                        if (!transientReferences.TryGetValue(id, out int ordinal))
+                        {
+                            ordinal = transientReferences.Count;
+                            transientReferences.Add(id, ordinal);
+                        }
+                        builder.Append('|').Append(property.propertyPath).Append('=').Append(ordinal);
+                    }
+                }
             }
 
             using var sha = SHA1.Create();
